@@ -43,14 +43,16 @@ function makeFakeNative({ w = 8, h = 6, origin = { x: 0, y: 0 }, supports = true
 const names = (n) => n.calls.map((c) => c[0]);
 const count = (n, x) => names(n).filter((y) => y === x).length;
 
-test("screenshot 走完整 GDI 链路并返回图片", async () => {
+test("screenshot 走完整 GDI 链路并返回图片 + 坐标契约", async () => {
   const native = makeFakeNative();
   const driver = new WindowsDriver({ native });
-  const result = await driver.screenshot();
+  const [result, note] = await driver.screenshot();
   assert.equal(result.type, "image");
   assert.equal(result.mimeType, "image/png");
   assert.equal(result.width, 8);
   assert.equal(result.height, 6);
+  assert.equal(note.type, "text");
+  assert.match(note.text, /相对本截图左上角/);
   // BGRA(10,20,30) 应被转为 RGBA(30,20,10)
   const png = Buffer.from(result.data, "base64");
   const decoded = decodePng(png);
@@ -220,12 +222,63 @@ test("inspect 默认返回文本元素清单", async () => {
 test("inspect annotate=true 返回带编号框的标注图", async () => {
   const native = makeFakeNative({ w: 200, h: 150 });
   const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
-  const out = await driver.inspect({ annotate: true });
+  const [out] = await driver.inspect({ annotate: true });
   assert.equal(out.type, "image");
   assert.equal(out.width, 200);
   const decoded = decodePng(Buffer.from(out.data, "base64"));
   const i = (100 * decoded.width + 110) * 4; // 元素上边 (110,100)
   assert.deepEqual([...decoded.rgba.subarray(i, i + 3)], [57, 255, 20]);
+});
+
+test("inspect 输出的 bbox 是截图内相对坐标（多屏负原点会被换算）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150, origin: { x: -100, y: -100 } });
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner([
+      { name: "确定", role: "Button", bbox: { x: -90, y: -80, w: 40, h: 20 }, cx: -70, cy: -70 }
+    ])
+  });
+  const out = await driver.inspect();
+  // UIA 给的是绝对 (-90,-80,40,20)，截图内应为 (10,20,40,20)
+  assert.match(out, /bbox=\(10,20,40,20\)/);
+  assert.match(out, /虚拟屏原点 -100,-100/);
+});
+
+test("缩放：截图降到长边上限，display 坐标与缩放后图一致，反向换算回物理坐标", async () => {
+  const native = makeFakeNative({ w: 400, h: 200 });
+  const driver = new WindowsDriver({
+    native, maxSidePixels: 200, uiaRunner: uiaRunner([
+      { name: "按钮", role: "Button", bbox: { x: 200, y: 100, w: 100, h: 50 }, cx: 250, cy: 125 }
+    ])
+  });
+  const [shot, note] = await driver.screenshot();
+  assert.equal(shot.width, 200); // 长边压到 200
+  assert.equal(shot.height, 100);
+  assert.match(note.text, /scale=0\.5000/);
+
+  const out = await driver.inspect();
+  // 绝对 (200,100) 在 scale 0.5 下是 display (100,50)
+  assert.match(out, /截图尺寸 200x100/);
+  assert.match(out, /bbox=\(100,50,50,25\)/);
+
+  // 模型给出 display 坐标 (100,50) -> 应还原成物理 (200,100)
+  await driver.clickTarget({ x: 100, y: 50 });
+  const move = native.calls.filter((c) => c[0] === "setCursorPos").at(-1);
+  assert.deepEqual([move[1], move[2]], [200, 100]);
+
+  // elementId 走物理绝对中心点，不受缩放影响
+  await driver.clickTarget({ elementId: 0 });
+  const move2 = native.calls.filter((c) => c[0] === "setCursorPos").at(-1);
+  assert.deepEqual([move2[1], move2[2]], [250, 125]);
+});
+
+test("cursorPosition 返回 display 与物理两套坐标", async () => {
+  const native = makeFakeNative({ w: 400, h: 200, origin: { x: -100, y: 0 } });
+  native.cursorPos = () => ({ x: 100, y: 50 });
+  const driver = new WindowsDriver({ native, maxSidePixels: 200 });
+  await driver.screenshot();
+  const pos = await driver.cursorPosition();
+  assert.deepEqual(pos, { x: 100, y: 25, screenX: 100, screenY: 50 });
 });
 
 test("clickTarget 按 elementId 使用元素绝对坐标（不加虚拟原点）", async () => {

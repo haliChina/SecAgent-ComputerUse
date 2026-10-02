@@ -4,14 +4,18 @@
 //   - 生产：createKoffiNative() 经 koffi FFI 调 user32/gdi32（文件底部）。
 //   - 测试：注入 fake native / uiaRunner / fetchImpl，即可在非 Windows 验证全部逻辑。
 //
-// 坐标约定：
-//   - 对外的 x,y 一律是“相对截图左上角的物理像素”，内部加虚拟原点；
-//   - inspect 返回的元素 bbox/cx/cy 是“绝对物理坐标”，按 elementId 点击时直接使用。
+// 坐标约定（对外契约，唯一一套）：
+//   - 模型看到的截图可能被缩放（长边上限 maxSidePixels），因此所有工具的 x,y
+//     一律是“相对截图左上角、单位与模型看到的截图像素一致”的 display 坐标；
+//   - 内部一律换算回物理绝对坐标（display / scale + 虚拟原点）再调系统 API；
+//   - inspect 列出的元素 bbox 同样是 display 坐标，按 elementId 点击时直接用
+//     内部保存的绝对中心点，模型全程不接触物理坐标。
 import { createRequire } from "node:module";
 import { encodePNG } from "./png.mjs";
+import { computeScale, scaleImage } from "./scale.mjs";
 import { parseChord, isModifier } from "./keycodes.mjs";
 import { inspectViaUia } from "./uia-inspect.mjs";
-import { buildElementMap, describeElements, findElement, DEFAULT_CAP } from "./element-map.mjs";
+import { buildElementMap, describeElements, findElement, toDisplayMap, DEFAULT_CAP } from "./element-map.mjs";
 import { parseWithOmniParser } from "./omniparser.mjs";
 import { drawSom } from "./draw-som.mjs";
 
@@ -65,16 +69,19 @@ export class WindowsDriver {
    * @param {number} [opts.minElements=3] auto 模式下 UIA 少于该数则尝试 OmniParser
    * @param {number} [opts.uiaTimeoutMs=15000] UIA 查询超时
    * @param {boolean} [opts.clickableOnly=true] OmniParser 是否只保留可点元素
+   * @param {number} [opts.maxSidePixels=0] 截图长边上限（0 = 不缩放），模型可见坐标空间
    * @param {() => object} [opts.configProvider] 返回当前合并后设置；提供后每次调用动态读取，优先级高于固定字段
    */
   constructor({
     native, uiaRunner, omniEndpoint, fetchImpl,
     maxElements, minElements = 3,
     uiaTimeoutMs = 15000, clickableOnly = true,
+    maxSidePixels = 0,
     configProvider
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
+    this.scale = 1;
     this.uiaRunner = uiaRunner;
     this.omniEndpoint = omniEndpoint;
     this.fetchImpl = fetchImpl;
@@ -82,6 +89,7 @@ export class WindowsDriver {
     this.minElements = minElements;
     this.uiaTimeoutMs = uiaTimeoutMs;
     this.clickableOnly = clickableOnly;
+    this.maxSidePixels = maxSidePixels;
     this.configProvider = typeof configProvider === "function" ? configProvider : null;
     this.#lastMap = { elements: [], total: 0, truncated: false, source: "uia" };
   }
@@ -99,8 +107,29 @@ export class WindowsDriver {
       uiaTimeoutMs: this.uiaTimeoutMs,
       omniEnabled: !!this.omniEndpoint,
       omniEndpoint: this.omniEndpoint,
+      maxSidePixels: this.maxSidePixels,
       defaultScrollSteps: 3
     };
+  }
+
+  /** 按设置把物理截图缩放到模型友好尺寸，并记录换算系数。 */
+  #prepareImage(capture) {
+    const cfg = this.#cfg();
+    this.scale = computeScale(capture.width, capture.height, Number(cfg.maxSidePixels) || 0);
+    return scaleImage(capture, this.scale);
+  }
+
+  /** 几何说明文本：模型据此知道该用哪套坐标系。 */
+  #geometryText(image, physical) {
+    const s = this.scale;
+    const parts = [
+      `截图（模型所见）${image.width}x${image.height}`,
+      `物理分辨率 ${physical.width}x${physical.height}`
+    ];
+    if (s !== 1) parts.push(`缩放系数 scale=${s.toFixed(4)}（系统自动换算，不要自己乘除）`);
+    if (this.origin.x || this.origin.y)
+      parts.push(`虚拟屏原点 ${this.origin.x},${this.origin.y}（多显示器，已归一到截图内）`);
+    return `坐标契约：所有 x,y 一律相对本截图左上角 (0,0)，单位与上面这张图一致。${parts.join("；")}。`;
   }
 
   async #ensureNative() {
@@ -162,14 +191,36 @@ export class WindowsDriver {
     });
   }
 
-  /** 截取整个虚拟屏幕，返回图片内容。 */
+  /** 截取整个虚拟屏幕，返回图片 + 坐标契约说明。 */
   async screenshot() {
     const c = await this.#capture();
-    return toImageContent(encodePNG(c), "screen.png", c.width, c.height);
+    const image = this.#prepareImage(c);
+    return [
+      toImageContent(encodePNG(image), "screen.png", image.width, image.height),
+      { type: "text", text: this.#geometryText(image, c) }
+    ];
+  }
+
+  /** 读取当前鼠标指针位置（display 坐标 + 物理屏幕坐标）。 */
+  async cursorPosition() {
+    return await this.#withThreadDpi(async () => {
+      const n = await this.#ensureNative();
+      if (typeof n.cursorPos !== "function")
+        throw new Error("当前系统库不支持读取光标位置（缺少 GetCursorPos）。");
+      const p = n.cursorPos();
+      const s = this.scale === 1 ? 1 : this.scale;
+      return {
+        x: Math.round((p.x - this.origin.x) * s),
+        y: Math.round((p.y - this.origin.y) * s),
+        screenX: p.x,
+        screenY: p.y
+      };
+    });
   }
 
   #toAbsolute(x, y) {
-    return { x: x + this.origin.x, y: y + this.origin.y };
+    const s = this.scale === 1 ? 1 : this.scale;
+    return { x: x / s + this.origin.x, y: y / s + this.origin.y };
   }
 
   /**
@@ -179,11 +230,13 @@ export class WindowsDriver {
    * @param {boolean} [opts.annotate=false] true 返回带编号框的 SoM 标注图，否则返回文本清单
    * @param {boolean} [opts.clickableOnly] 缺省取设置 clickableOnly
    */
-  async inspect({ backend, annotate = false, clickableOnly } = {}) {
+  async inspect({ backend, annotate = false, clickableOnly, scope } = {}) {
     const cfg = this.#cfg();
     const useBackend = backend ?? cfg.backend ?? "auto";
     const useClickable = clickableOnly ?? cfg.clickableOnly ?? true;
+    const useScope = scope ?? cfg.uiaScope ?? "foreground";
     const capture = await this.#capture();
+    const image = this.#prepareImage(capture);
 
     let map = null;
     if (useBackend === "uia" || useBackend === "auto") {
@@ -191,7 +244,8 @@ export class WindowsDriver {
       try {
         uiaRaw = await inspectViaUia({
           runner: this.uiaRunner,
-          timeout: cfg.uiaTimeoutMs
+          timeout: cfg.uiaTimeoutMs,
+          scope: useScope
         });
       } catch {
         uiaRaw = [];
@@ -222,11 +276,25 @@ export class WindowsDriver {
     if (!map) map = buildElementMap([], "uia", { cap: cfg.maxElements });
     this.#lastMap = map;
 
+    // 对模型一律输出 display 坐标；点击仍用 map 里保存的物理绝对坐标。
+    const displayMap = toDisplayMap(map, { origin: capture.origin, scale: this.scale });
+    const geometry = {
+      origin: capture.origin,
+      scale: this.scale,
+      displayWidth: image.width,
+      displayHeight: image.height
+    };
+
     if (annotate) {
-      const marked = drawSom(capture, map.elements, capture.origin);
-      return toImageContent(encodePNG(marked), "elements.png", capture.width, capture.height);
+      const marked = drawSom(image, displayMap.elements, { x: 0, y: 0 }, {
+        scale: this.scale === 1 ? 2 : Math.max(1, Math.round(2 * this.scale))
+      });
+      return [
+        toImageContent(encodePNG(marked), "elements.png", marked.width, marked.height),
+        { type: "text", text: this.#geometryText(image, capture) + "\n框内数字即元素编号，点击时用 click(elementId)。" }
+      ];
     }
-    return describeElements(map);
+    return describeElements(displayMap, geometry);
   }
 
   async move(x, y) {
@@ -374,6 +442,7 @@ export function createKoffiNative() {
   const ReleaseDC = user32.func("int ReleaseDC(void* hWnd, void* hDC)");
   const GetSystemMetrics = user32.func("int GetSystemMetrics(int nIndex)");
   const SetCursorPos = user32.func("bool SetCursorPos(int X, int Y)");
+  const GetCursorPos = user32.func("bool GetCursorPos(void* lpPoint)");
   const mouse_event = user32.func("void mouse_event(uint32 dwFlags, int dx, int dy, uint32 dwData, uintptr dwExtraInfo)");
   const keybd_event = user32.func("void keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr dwExtraInfo)");
   const MapVirtualKeyW = user32.func("uint32 MapVirtualKeyW(uint32 uCode, uint32 uMapType)");
@@ -441,6 +510,11 @@ export function createKoffiNative() {
     getDIBits: (dc, bmp, h, bits, bi) =>
       GetDIBits(dc, bmp, 0, h, bits, bi, DIB_RGB_COLORS),
     setCursorPos: (x, y) => SetCursorPos(x, y),
+    cursorPos: () => {
+      const point = koffi.alloc(8); // POINT { LONG x; LONG y; }
+      if (!GetCursorPos(point)) throw new Error("GetCursorPos 失败");
+      return { x: koffi.decode(point, koffi.pointer("int32")), y: koffi.decode(point, koffi.pointer("int32"), 8) };
+    },
     mouseEvent: (flags, data) => mouse_event(flags, 0, 0, data, 0),
     keybdEvent: (vk, scan, flags) => keybd_event(vk, scan, flags, 0),
     mapVirtualKey: (vk) => MapVirtualKeyW(vk, 0)

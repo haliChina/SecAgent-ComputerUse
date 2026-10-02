@@ -34,9 +34,9 @@ async function withPlatform(platform, fn) {
   }
 }
 
-const EXPECTED_TOOLS = ["click", "doctor", "drag", "inspect", "key", "move", "screenshot", "scroll", "settings", "type"];
+const EXPECTED_TOOLS = ["click", "clipboard", "cursor_position", "doctor", "drag", "focus", "inspect", "key", "launch", "move", "screenshot", "scroll", "settings", "type", "wait", "windows"];
 
-test("Windows 下注册 10 个可见工具、1 个 prompt、1 个 skill、1 个设置 handler", async () => {
+test("Windows 下注册 16 个可见工具、1 个 prompt、1 个 skill、1 个设置 handler", async () => {
   await withPlatform("win32", async () => {
     const api = fakeApi();
     const dispose = await activate(api);
@@ -78,7 +78,7 @@ test("非 Windows 平台仍注册工具，但状态提示动作仅可在 Windows
     const api = fakeApi();
     const dispose = await activate(api);
     try {
-      assert.equal(api.tools.length, 10);
+      assert.equal(api.tools.length, 16);
       assert.equal(api.statuses.at(-1).state, "ready");
       assert.match(api.statuses.at(-1).message, /仅可在 Windows/);
     } finally {
@@ -94,6 +94,19 @@ test("screenshot 回调在无真实 Win32 时拒绝，而非返回伪造图片",
     try {
       const screenshot = api.tools.find((t) => t.name === "screenshot");
       await assert.rejects(() => screenshot.call({}));
+    } finally {
+      await dispose();
+    }
+  });
+});
+
+test("剪贴板默认关闭：未开启时工具拒绝执行", async () => {
+  await withPlatform("win32", async () => {
+    const api = fakeApi();
+    const dispose = await activate(api);
+    try {
+      const clipboard = api.tools.find((t) => t.name === "clipboard");
+      await assert.rejects(() => clipboard.call({ action: "read" }), /剪贴板功能当前关闭/);
     } finally {
       await dispose();
     }

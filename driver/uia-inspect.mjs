@@ -22,9 +22,8 @@ public class WinApi {
   public static extern IntPtr GetForegroundWindow();
 }
 "@
-$handle = [WinApi]::GetForegroundWindow()
-$window = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-$all = $window.FindAll(
+$root = __ROOT__
+$all = $root.FindAll(
   [System.Windows.Automation.TreeScope]::Descendants,
   [System.Windows.Automation.Condition]::TrueCondition)
 
@@ -65,6 +64,18 @@ export function encodePsCommand(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }
 
+// foreground = 只看前台窗口（快、准，默认）；desktop = 从桌面根节点出发，
+// 可覆盖任务栏 / 桌面图标 / 后台窗口（慢、元素多，配合元素上限截断）。
+const ROOTS = {
+  foreground: `$root = [System.Windows.Automation.AutomationElement]::FromHandle([WinApi]::GetForegroundWindow())`,
+  desktop: `$root = [System.Windows.Automation.AutomationElement]::RootElement`
+};
+
+/** 生成指定侦察范围的 PowerShell 脚本（scope 非法时回退 foreground）。 */
+export function buildUiaScript(scope = "foreground") {
+  return POWERSHELL_SCRIPT.replace("__ROOT__", ROOTS[scope] ?? ROOTS.foreground);
+}
+
 function defaultRunner(encoded, timeout) {
   const exe = process.platform === "win32" ? "powershell.exe" : "pwsh";
   return execFileAsync(
@@ -93,15 +104,16 @@ function cleanNumeric(rec) {
 }
 
 /**
- * 侦察前台窗口。
+ * 侦察窗口元素。
  * @param {object} opts
  * @param {(encoded:string,timeout:number)=>Promise<{stdout:string,stderr:string}>} [opts.runner]
  * @param {number} [opts.timeout=15000]
+ * @param {"foreground"|"desktop"} [opts.scope="foreground"]
  * @returns {Promise<Array<object>>} 清洗后的原始元素记录（绝对物理坐标）
  */
-export async function inspectViaUia({ runner, timeout = 15000 } = {}) {
+export async function inspectViaUia({ runner, timeout = 15000, scope = "foreground" } = {}) {
   const run = runner ?? defaultRunner;
-  const encoded = encodePsCommand(POWERSHELL_SCRIPT);
+  const encoded = encodePsCommand(buildUiaScript(scope));
   let result;
   try {
     result = await run(encoded, timeout);

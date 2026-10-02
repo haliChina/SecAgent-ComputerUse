@@ -1,12 +1,12 @@
 {
   "name": "secagent-computer-use-plugin",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "SecAgent plugin: Windows GUI control with settings console, one-click OmniParser, element map, click-by-id, screenshot, type, key, scroll, drag",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check main.mjs && node --check driver/win-driver.mjs && node --check driver/doctor.mjs && node --check driver/png.mjs && node --check driver/keycodes.mjs && node --check driver/uia-inspect.mjs && node --check driver/element-map.mjs && node --check driver/omniparser.mjs && node --check driver/draw-som.mjs && node --check settings/config-schema.mjs && node --check settings/settings-server.mjs && node --check settings/console-page.mjs && node --check omniparser/omniparser-manager.mjs && node --check omniparser/server-template.mjs && node --check reasoning/nudge.mjs",
+    "check": "node --check main.mjs && node --check driver/win-driver.mjs && node --check driver/doctor.mjs && node --check driver/png.mjs && node --check driver/keycodes.mjs && node --check driver/uia-inspect.mjs && node --check driver/element-map.mjs && node --check driver/omniparser.mjs && node --check driver/draw-som.mjs && node --check driver/scale.mjs && node --check driver/system-ops.mjs && node --check settings/config-schema.mjs && node --check settings/settings-server.mjs && node --check settings/console-page.mjs && node --check omniparser/omniparser-manager.mjs && node --check omniparser/server-template.mjs && node --check reasoning/nudge.mjs",
     "pack": "node scripts/pack.mjs"
   },
   "dependencies": {

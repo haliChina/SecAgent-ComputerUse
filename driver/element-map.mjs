@@ -1,8 +1,12 @@
 // 元素地图：把不同感知来源（UIA / OmniParser）归一化成统一 ElementRecord，
 // 并提供给模型阅读的紧凑清单、按编号查找。
 //
-// 所有 bbox / cx / cy 均为“绝对物理屏幕坐标”（UIA 与 OmniParser 都输出绝对坐标），
-// driver 点击时直接使用，无需再加虚拟原点。
+// 坐标约定（对外契约）：
+//   - 内部存储：bbox / cx / cy 一律是“绝对物理屏幕坐标”，driver 点击时直接使用；
+//   - 对模型输出：统一换算到 display 空间（相对截图左上角、按 scale 缩放后），
+//     与模型看到的截图像素一一对应，杜绝“绝对 / 相对”混用导致点飞。
+import { boxToDisplay, toDisplay } from "./scale.mjs";
+
 export const DEFAULT_CAP = 60;
 
 const intv = (v) => Number(v) | 0;
@@ -75,8 +79,33 @@ export function buildElementMap(rawList, source, { cap = DEFAULT_CAP, clickableO
   return { elements, total, truncated: total > elements.length, source };
 }
 
+/**
+ * 生成 display 空间的元素地图副本（给模型看 / 画 SoM 用）。
+ * 物理绝对坐标保留在 absBBox/absCx/absCy，点击仍走绝对坐标。
+ * @param {{elements:Array,total:number,truncated:boolean,source:string}} map
+ * @param {{origin?:{x:number,y:number}, scale?:number}} [geometry]
+ */
+export function toDisplayMap(map, geometry = {}) {
+  const origin = geometry.origin ?? { x: 0, y: 0 };
+  const scale = geometry.scale ?? 1;
+  if (origin.x === 0 && origin.y === 0 && scale === 1) return map;
+  const elements = map.elements.map((e) => {
+    const abs = { bbox: e.bbox, cx: e.cx, cy: e.cy };
+    return {
+      ...e,
+      absBBox: abs.bbox,
+      absCx: e.cx,
+      absCy: e.cy,
+      bbox: boxToDisplay(e.bbox, origin, scale),
+      cx: toDisplay({ x: e.cx, y: e.cy }, origin, scale).x,
+      cy: toDisplay({ x: e.cx, y: e.cy }, origin, scale).y
+    };
+  });
+  return { ...map, elements };
+}
+
 /** 生成给模型阅读的元素清单文本（模型据此选编号，不自行估坐标）。 */
-export function describeElements(map) {
+export function describeElements(map, geometry = {}) {
   const { elements, total, truncated, source } = map;
   const lines = elements.map((e) => {
     const nm = e.name ? e.name.replace(/\s+/g, " ").trim() : "(无名称)";
@@ -85,7 +114,12 @@ export function describeElements(map) {
   });
   let head = `检测到 ${total} 个元素（来源：${source === "uia" ? "Windows UI Automation" : "OmniParser"}）`;
   if (truncated) head += `，仅列出前 ${elements.length} 个`;
-  head += "。请回复要操作的元素编号（如 #3），坐标由系统给出，不要自行估计像素。";
+  head += "。bbox 为截图内相对坐标（左上角为 0,0，单位与截图像素一致）。";
+  if (geometry.displayWidth && geometry.displayHeight)
+    head += `截图尺寸 ${geometry.displayWidth}x${geometry.displayHeight}`;
+  if (geometry.origin && (geometry.origin.x || geometry.origin.y))
+    head += `（多显示器：虚拟屏原点 ${geometry.origin.x},${geometry.origin.y}，截图已归一，无需自行换算）`;
+  head += "请回复要操作的元素编号（如 #3），坐标由系统给出，不要自行估计像素。";
   return head + "\n" + lines.join("\n");
 }
 

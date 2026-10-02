@@ -29,6 +29,16 @@ export const SETTING_FIELDS = [
     label: "UIA 查询超时（毫秒）", effect: "immediate" },
   { key: "minElements", group: "perception", type: "number", default: 3, min: 0, max: 20, step: 1,
     label: "自动回退阈值", hint: "UIA 元素少于该数量时回退 OmniParser。", effect: "immediate" },
+  { key: "maxSidePixels", group: "perception", type: "number", default: 1568, min: 0, max: 4096, step: 8,
+    label: "截图长边上限（像素）",
+    hint: "0 = 不缩放。默认 1568 与 Claude computer-use 一致：模型看到的图与输出坐标都在同一坐标系，系统自动换算回物理像素。高分屏建议保留默认值，否则上下文与费用会明显上升。",
+    effect: "immediate" },
+  { key: "uiaScope", group: "perception", type: "select", default: "foreground",
+    options: [
+      { value: "foreground", label: "仅前台窗口（快、准）" },
+      { value: "desktop", label: "整个桌面（含任务栏/桌面图标，慢）" }
+    ],
+    label: "UIA 侦察范围", effect: "immediate" },
 
   // —— OmniParser ——
   { key: "omniEnabled", group: "omniparser", type: "boolean", default: false,
@@ -69,7 +79,11 @@ export const SETTING_FIELDS = [
 
   // —— 安全 ——
   { key: "confirmDestructive", group: "safety", type: "boolean", default: true,
-    label: "对不可逆/高风险动作先确认", hint: "如删除、提交、支付、发送等。", effect: "guidance" }
+    label: "对不可逆/高风险动作先确认", hint: "如删除、提交、支付、发送等。宿主侧工具守卫会对高风险输入键入/组合键做硬拦截，本项是提示词层面的补充。", effect: "guidance" },
+  { key: "clipboardEnabled", group: "safety", type: "boolean", default: false,
+    label: "允许剪贴板读写",
+    hint: "默认关闭。剪贴板可能含密码、验证码、令牌，开启后模型可读取，属于敏感能力，请确认环境可控再打开。",
+    effect: "immediate" }
 ];
 
 export const DEFAULT_CONFIG = Object.freeze(

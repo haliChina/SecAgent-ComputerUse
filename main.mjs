@@ -3,6 +3,7 @@
 import { WindowsDriver } from "./driver/win-driver.mjs";
 import { createKoffiNative } from "./driver/win-driver.mjs";
 import { runDoctor, formatDoctorReport } from "./driver/doctor.mjs";
+import { listWindows, focusWindow, readClipboard, writeClipboard, launchApp } from "./driver/system-ops.mjs";
 import { mergeConfig, describeSettings, DEFAULT_CONFIG } from "./settings/config-schema.mjs";
 import { createSettingsServer } from "./settings/settings-server.mjs";
 import { CONSOLE_HTML } from "./settings/console-page.mjs";
@@ -15,8 +16,8 @@ const pointSchema = (extra = {}) => ({
   additionalProperties: false,
   required: ["x", "y"],
   properties: {
-    x: { type: "integer", description: "相对截图左上角的 X 像素" },
-    y: { type: "integer", description: "相对截图左上角的 Y 像素" },
+    x: { type: "integer", description: "相对本次截图左上角的 X 像素（坐标契约见 screenshot 返回）" },
+    y: { type: "integer", description: "相对本次截图左上角的 Y 像素（坐标契约见 screenshot 返回）" },
     ...extra
   }
 });
@@ -29,11 +30,13 @@ function asInt(value, name) {
 
 const STATIC_RULES = `## 电脑操作规则（Computer Use）
 - 首次使用或动作失败时，先运行 doctor 自检：逐项验证环境并按修复建议处理，通过后再干活。
+- 坐标只有一套：所有 x,y 一律相对**本次截图**左上角，单位与模型看到的截图一致；系统已处理缩放与多显示器偏移，不要自己乘除或使用绝对屏幕坐标。
 - 优先“元素地图”而非裸坐标：操作前先 inspect 获取可交互元素清单（编号/名称/角色），点击时给 click 传 elementId，坐标由系统给出，不要自行估计像素。
-- 标准节奏：screenshot 观察整体 → inspect 拿到元素编号 → click(elementId) 或 type/key → 再 screenshot 验证，逐步推进。
+- 标准节奏：screenshot 观察整体 → inspect 拿到元素编号 → click(elementId) 或 type/key → 需要时 wait 等待界面响应 → 再 screenshot 验证，逐步推进。
 - 需要视觉核对时用 inspect(annotate=true) 查看带编号框的标注图；界面一旦变化，元素地图即过期，需重新 inspect。
 - 需要输入文字时，先按 elementId 点击输入框使其聚焦，再 type；需要快捷键时用 key。
-- 若 UIA 元素过少（自绘界面、游戏、Canvas），在已启用 OmniParser 时用 inspect(backend="omniparser")。
+- 要打开别的程序：优先 launch(command) 或 focus(title 窗口标题正则)，不要靠盲点任务栏图标。
+- 若 UIA 元素过少（自绘界面、游戏、Canvas），在已启用 OmniParser 时用 inspect(backend="omniparser")；要看任务栏/桌面图标用 inspect(scope="desktop")。
 - 每个方案最多自我反驳一轮，禁止在两个位置或方案间反复横跳；连续 2 次动作无进展就换思路或向用户说明卡点。
 - 信息无法再获取时，选择可逆、下行风险小的动作，并明确标注不确定之处；不要为求最优而无限权衡。`;
 
@@ -172,11 +175,46 @@ export async function activate(api) {
     {
       name: "screenshot",
       description:
-        "截取当前整个屏幕并把图片直接提供给模型。用于观察整体布局，动作后再次调用以验证结果。",
+        "截取当前整个屏幕（含多显示器）并把图片直接提供给模型，同时返回坐标契约说明（截图尺寸/物理分辨率/缩放系数/虚拟屏原点）。用于观察整体布局，动作后再次调用以验证结果。",
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       hidden: false
     },
     guarded("screenshot", async () => await driver.screenshot())
+  );
+
+  // 2.1) 等待：动作之间给界面渲染留时间，避免“点了没反应就接着输入”
+  api.registerTool(
+    {
+      name: "wait",
+      description:
+        "等待指定的毫秒数后再继续，用于界面加载/弹窗/网络请求。上限 10 秒。连续动作之间建议先 wait 300-800 毫秒。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ms: { type: "integer", description: "等待毫秒数，50-10000，默认 500" }
+        }
+      },
+      hidden: false
+    },
+    guarded("wait", async (a) => {
+      const ms = a.ms == null ? 500 : asInt(a.ms, "ms");
+      const clamped = Math.min(10000, Math.max(50, ms));
+      await new Promise((resolve) => setTimeout(resolve, clamped));
+      return { waited: clamped };
+    })
+  );
+
+  // 2.2) 读取鼠标位置：判断上一次点击是否真的落在目标上
+  api.registerTool(
+    {
+      name: "cursor_position",
+      description:
+        "读取当前鼠标指针位置，返回本次截图坐标系下的 x,y 以及物理屏幕坐标。用于核对上一次点击/移动是否落在预期位置。",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      hidden: false
+    },
+    guarded("cursor_position", async () => await driver.cursorPosition())
   );
 
   // 3) 元素侦察
@@ -195,7 +233,13 @@ export async function activate(api) {
             description: "缺省取设置；auto=UIA 优先、元素过少时回退 OmniParser"
           },
           annotate: { type: "boolean", description: "true 返回带编号框的标注图" },
-          clickableOnly: { type: "boolean", description: "OmniParser 下是否只保留可点元素" }
+          clickableOnly: { type: "boolean", description: "OmniParser 下是否只保留可点元素" },
+          scope: {
+            type: "string",
+            enum: ["foreground", "desktop"],
+            description:
+              "UIA 侦察范围：foreground 只看前台窗口（默认，快）；desktop 从桌面根节点出发，可覆盖任务栏/桌面图标/后台窗口（慢、元素多）"
+          }
         }
       },
       hidden: false
@@ -206,9 +250,102 @@ export async function activate(api) {
         await driver.inspect({
           backend: a.backend,
           annotate: a.annotate === true,
-          clickableOnly: a.clickableOnly
+          clickableOnly: a.clickableOnly,
+          scope: a.scope
         })
     )
+  );
+
+  // 3.1) 窗口列表 / 聚焦 / 启动 / 剪贴板
+  api.registerTool(
+    {
+      name: "windows",
+      description: "列出当前所有可见顶层窗口（标题 + 进程号），用于定位目标程序。",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      hidden: false
+    },
+    guarded("windows", async () => {
+      const list = await listWindows({ timeout: readConfig().uiaTimeoutMs });
+      return { windows: list, count: list.length };
+    })
+  );
+
+  api.registerTool(
+    {
+      name: "focus",
+      description:
+        "把焦点切到标题匹配正则的窗口（不区分大小写）。比盲点任务栏可靠；匹配不到会报错并附当前窗口列表。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title"],
+        properties: { title: { type: "string", description: "窗口标题正则，如 notepad|记事本" } }
+      },
+      hidden: false
+    },
+    guarded("focus", async (a) => {
+      if (typeof a.title !== "string" || !a.title.trim())
+        throw new Error("focus 需要非空 title（窗口标题正则）");
+      return await focusWindow({ title: a.title, timeout: readConfig().uiaTimeoutMs });
+    })
+  );
+
+  api.registerTool(
+    {
+      name: "launch",
+      description:
+        "启动应用或打开文件（detached，不阻塞）。例如 launch('notepad')。启动后建议 wait 再 screenshot。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["command"],
+        properties: {
+          command: { type: "string", description: "可执行文件名或文件路径" },
+          args: { type: "array", items: { type: "string" }, description: "可选参数" }
+        }
+      },
+      hidden: false
+    },
+    guarded("launch", async (a) => {
+      if (typeof a.command !== "string" || !a.command.trim())
+        throw new Error("launch 需要非空 command");
+      if (a.args != null && !Array.isArray(a.args))
+        throw new Error("launch 的 args 必须是字符串数组");
+      return launchApp({ command: a.command, args: a.args ?? [] });
+    })
+  );
+
+  api.registerTool(
+    {
+      name: "clipboard",
+      description:
+        "读写剪贴板文本。action=read 读取，action=write 需带 text。默认在设置中禁用（剪贴板可能含密码等敏感信息），需用户显式开启。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action"],
+        properties: {
+          action: { type: "string", enum: ["read", "write"] },
+          text: { type: "string", description: "action=write 时必填" }
+        }
+      },
+      hidden: false
+    },
+    guarded("clipboard", async (a) => {
+      if (!readConfig().clipboardEnabled)
+        throw new Error(
+          "剪贴板功能当前关闭。如确需使用，请让用户在设置控制台开启「允许剪贴板读写」。"
+        );
+      if (a.action === "read") {
+        const text = await readClipboard({ timeout: readConfig().uiaTimeoutMs });
+        return { clipboard: text, length: text.length };
+      }
+      if (a.action === "write") {
+        if (typeof a.text !== "string") throw new Error("clipboard write 需要 text 字符串");
+        return await writeClipboard({ text: a.text, timeout: readConfig().uiaTimeoutMs });
+      }
+      throw new Error("clipboard 的 action 必须是 read 或 write");
+    })
   );
 
   // 4) 点击
@@ -216,7 +353,7 @@ export async function activate(api) {
     {
       name: "click",
       description:
-        "点击目标。优先传 elementId（来自 inspect 的元素编号，坐标由系统给出，最准）；也可传 x,y 坐标兜底。可指定左右中键与双击。",
+        "点击目标。优先传 elementId（来自 inspect 的元素编号，坐标由系统给出，最准）；也可传 x,y 兜底（相对本次截图左上角）。可指定左右中键与双击。",
       inputSchema: {
         type: "object",
         additionalProperties: false,
