@@ -2,16 +2,23 @@
   "apiVersion": 1,
   "id": "computer-use",
   "name": "Computer Use",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "main": "main.mjs",
   "icon": "assets/icon.png",
-  "description": "让 Agent 操控 Windows：元素侦察（UI Automation/OmniParser）、按编号点击、截屏、输入、组合键、滚动、拖拽。需配合视觉多模态模型。",
+  "description": "让 Agent 操控 Windows：元素侦察（UI Automation/OmniParser 一键安装）、按编号点击、截屏、输入、组合键、滚动、拖拽，并内置可调参数设置控制台。需配合视觉多模态模型。",
   "author": "hali",
   "repository": "https://github.com/haliChina/SecAgent-ComputerUse",
   "permissions": [
     "agent.tools",
     "agent.skills",
-    "agent.prompts"
+    "agent.prompts",
+    "agent.settings"
   ],
-  "settingsPages": []
+  "settingsPages": [
+    {
+      "id": "computer-use-console",
+      "title": "Computer Use 控制台",
+      "description": "感知后端、OmniParser 一键安装、思考提醒与动作参数。"
+    }
+  ]
 }

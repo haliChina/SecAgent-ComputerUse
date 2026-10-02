@@ -59,14 +59,19 @@ export class WindowsDriver {
    * @param {object} opts
    * @param {ReturnType<typeof createKoffiNative>} [opts.native]
    * @param {Function} [opts.uiaRunner] 注入的 UIA PowerShell runner（测试用）
-   * @param {string} [opts.omniEndpoint] OmniParser 服务地址（配置后启用）
+   * @param {string} [opts.omniEndpoint] OmniParser 服务地址（固定值，无 configProvider 时用）
    * @param {Function} [opts.fetchImpl] 注入 fetch（测试用）
    * @param {number} [opts.maxElements] 元素地图最多列出的数量
    * @param {number} [opts.minElements=3] auto 模式下 UIA 少于该数则尝试 OmniParser
+   * @param {number} [opts.uiaTimeoutMs=15000] UIA 查询超时
+   * @param {boolean} [opts.clickableOnly=true] OmniParser 是否只保留可点元素
+   * @param {() => object} [opts.configProvider] 返回当前合并后设置；提供后每次调用动态读取，优先级高于固定字段
    */
   constructor({
     native, uiaRunner, omniEndpoint, fetchImpl,
-    maxElements, minElements = 3
+    maxElements, minElements = 3,
+    uiaTimeoutMs = 15000, clickableOnly = true,
+    configProvider
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
@@ -75,10 +80,28 @@ export class WindowsDriver {
     this.fetchImpl = fetchImpl;
     this.maxElements = maxElements ?? DEFAULT_CAP;
     this.minElements = minElements;
+    this.uiaTimeoutMs = uiaTimeoutMs;
+    this.clickableOnly = clickableOnly;
+    this.configProvider = typeof configProvider === "function" ? configProvider : null;
     this.#lastMap = { elements: [], total: 0, truncated: false, source: "uia" };
   }
 
   #lastMap;
+
+  /** 当前生效设置：优先 configProvider，否则回退构造时的固定字段。 */
+  #cfg() {
+    if (this.configProvider) return this.configProvider();
+    return {
+      backend: "auto",
+      maxElements: this.maxElements,
+      minElements: this.minElements,
+      clickableOnly: this.clickableOnly,
+      uiaTimeoutMs: this.uiaTimeoutMs,
+      omniEnabled: !!this.omniEndpoint,
+      omniEndpoint: this.omniEndpoint,
+      defaultScrollSteps: 3
+    };
+  }
 
   async #ensureNative() {
     if (!this.native) this.native = createKoffiNative();
@@ -152,43 +175,51 @@ export class WindowsDriver {
   /**
    * 侦察当前屏幕的可交互元素（UIA 优先，OmniParser 兜底）。
    * @param {object} [opts]
-   * @param {"auto"|"uia"|"omniparser"} [opts.backend="auto"]
+   * @param {"auto"|"uia"|"omniparser"} [opts.backend] 缺省取设置 backend
    * @param {boolean} [opts.annotate=false] true 返回带编号框的 SoM 标注图，否则返回文本清单
-   * @param {boolean} [opts.clickableOnly=true] OmniParser 结果是否只保留可点元素
+   * @param {boolean} [opts.clickableOnly] 缺省取设置 clickableOnly
    */
-  async inspect({ backend = "auto", annotate = false, clickableOnly = true } = {}) {
+  async inspect({ backend, annotate = false, clickableOnly } = {}) {
+    const cfg = this.#cfg();
+    const useBackend = backend ?? cfg.backend ?? "auto";
+    const useClickable = clickableOnly ?? cfg.clickableOnly ?? true;
     const capture = await this.#capture();
 
     let map = null;
-    if (backend === "uia" || backend === "auto") {
+    if (useBackend === "uia" || useBackend === "auto") {
       let uiaRaw = [];
       try {
-        uiaRaw = await inspectViaUia({ runner: this.uiaRunner });
+        uiaRaw = await inspectViaUia({
+          runner: this.uiaRunner,
+          timeout: cfg.uiaTimeoutMs
+        });
       } catch {
         uiaRaw = [];
       }
-      map = buildElementMap(uiaRaw, "uia", { cap: this.maxElements });
+      map = buildElementMap(uiaRaw, "uia", { cap: cfg.maxElements });
     }
 
+    // 仅在显式启用 OmniParser 时提供该后端地址。
+    const omniEndpoint = cfg.omniEnabled ? cfg.omniEndpoint : undefined;
     const needOmni =
-      backend === "omniparser" ||
-      (backend === "auto" && map && map.total < this.minElements && this.omniEndpoint);
+      useBackend === "omniparser" ||
+      (useBackend === "auto" && map && map.total < cfg.minElements && omniEndpoint);
     if (needOmni) {
       const imageBase64 = encodePNG(capture).toString("base64");
       const detections = await parseWithOmniParser({
-        endpoint: this.omniEndpoint,
+        endpoint: omniEndpoint,
         imageBase64,
         fetchImpl: this.fetchImpl
       });
       const om = buildElementMap(detections, "omniparser", {
-        cap: this.maxElements,
-        clickableOnly
+        cap: cfg.maxElements,
+        clickableOnly: useClickable
       });
-      if (backend === "omniparser" || (om.total > 0 && (!map || om.total > map.total)))
+      if (useBackend === "omniparser" || (om.total > 0 && (!map || om.total > map.total)))
         map = om;
     }
 
-    if (!map) map = buildElementMap([], "uia", { cap: this.maxElements });
+    if (!map) map = buildElementMap([], "uia", { cap: cfg.maxElements });
     this.#lastMap = map;
 
     if (annotate) {
