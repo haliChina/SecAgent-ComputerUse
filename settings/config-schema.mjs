@@ -30,8 +30,8 @@ export const SETTING_FIELDS = [
   { key: "minElements", group: "perception", type: "number", default: 3, min: 0, max: 20, step: 1,
     label: "自动回退阈值", hint: "UIA 元素少于该数量时回退 OmniParser。", effect: "immediate" },
   { key: "maxSidePixels", group: "perception", type: "number", default: 1568, min: 0, max: 4096, step: 8,
-    label: "截图长边上限（像素）",
-    hint: "0 = 不缩放。默认 1568 与 Claude computer-use 一致：模型看到的图与输出坐标都在同一坐标系，系统自动换算回物理像素。高分屏建议保留默认值，否则上下文与费用会明显上升。",
+    label: "截图长边上限 / 模型坐标分辨率（像素）",
+    hint: "0 = 不缩放。默认值 1568 与 Claude computer-use 一致。若主模型是坐标接地模型（UI-TARS、OSWorld 系 grounding 模型等），请把它设成该模型输出的坐标分辨率（如 1920×1080），落点最稳。系统会在执行前自动换算回物理像素。",
     effect: "immediate" },
   { key: "uiaScope", group: "perception", type: "select", default: "foreground",
     options: [

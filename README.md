@@ -41,6 +41,7 @@
 - 截图按“长边 ≤ `maxSidePixels`（默认 1568，与 Claude computer-use 一致）”缩放，多显示器虚拟原点（可能为负）也一并归一；
 - `screenshot` 会在图片后附一行文本，写明截图尺寸 / 物理分辨率 / `scale` / 虚拟原点；`inspect` 输出的 `bbox` 用同一套坐标；
 - 系统在执行动作前自动 `display ÷ scale + origin` 换算回物理像素；`elementId` 点击直接走元素物理中心，不受缩放影响。
+- **怎么选这个值**：默认 1568 对应 Claude computer-use 的坐标空间。若主模型是坐标接地模型（UI-TARS、OSWorld 系 grounding 模型），把它设成该模型输出的坐标分辨率（如 1920×1080）——这是 Agent-S 用 `--grounding_width/height` 显式对齐的同一件事，落点最稳。
 
 ## 安装
 
