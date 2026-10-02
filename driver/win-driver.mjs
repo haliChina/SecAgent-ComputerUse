@@ -1,14 +1,19 @@
-// Windows GUI 驱动：屏幕截图 + 鼠标 + 键盘。
+// Windows GUI 驱动：屏幕截图 + 元素侦察 + 鼠标 + 键盘。
 //
-// 架构：driver 只负责“编排”，所有真正的系统调用收敛到 native 原语层。
-//   - 生产环境：createKoffiNative() 通过 koffi FFI 调 user32/gdi32（见文件底部）。
-//   - 测试环境：注入 fake native，即可在非 Windows 上验证全部编排逻辑。
+// 架构：driver 只负责“编排”，真正的系统调用收敛到 native 原语层。
+//   - 生产：createKoffiNative() 经 koffi FFI 调 user32/gdi32（文件底部）。
+//   - 测试：注入 fake native / uiaRunner / fetchImpl，即可在非 Windows 验证全部逻辑。
 //
-// 坐标约定：工具对外坐标一律是“相对截图左上角的物理像素”，driver 内部加上
-// 多显示器虚拟原点，模型无需感知负坐标。
+// 坐标约定：
+//   - 对外的 x,y 一律是“相对截图左上角的物理像素”，内部加虚拟原点；
+//   - inspect 返回的元素 bbox/cx/cy 是“绝对物理坐标”，按 elementId 点击时直接使用。
 import { createRequire } from "node:module";
 import { encodePNG } from "./png.mjs";
 import { parseChord, isModifier } from "./keycodes.mjs";
+import { inspectViaUia } from "./uia-inspect.mjs";
+import { buildElementMap, describeElements, findElement, DEFAULT_CAP } from "./element-map.mjs";
+import { parseWithOmniParser } from "./omniparser.mjs";
+import { drawSom } from "./draw-som.mjs";
 
 // ---- Win32 常量 ----
 const SM_XVIRTUALSCREEN = 76;
@@ -29,7 +34,6 @@ const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const WHEEL_DELTA = 120;
 
-// 需要扩展键标志的虚拟键码（方向键、导航簇、右 Ctrl/Alt 等）。
 const EXTENDED_VKS = new Set([
   0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
   0x2d, 0x2e, 0x90, 0x2c, 0xa3, 0xa5, 0x6f
@@ -41,23 +45,47 @@ const BUTTONS = {
   middle: { down: MOUSEEVENTF.middleDown, up: MOUSEEVENTF.middleUp }
 };
 
+function toImageContent(pngBuffer, name, width, height) {
+  return {
+    type: "image",
+    data: pngBuffer.toString("base64"),
+    mimeType: "image/png",
+    name, width, height
+  };
+}
+
 export class WindowsDriver {
   /**
    * @param {object} opts
-   * @param {ReturnType<typeof createKoffiNative>} [opts.native] 可注入的系统原语（测试用）
+   * @param {ReturnType<typeof createKoffiNative>} [opts.native]
+   * @param {Function} [opts.uiaRunner] 注入的 UIA PowerShell runner（测试用）
+   * @param {string} [opts.omniEndpoint] OmniParser 服务地址（配置后启用）
+   * @param {Function} [opts.fetchImpl] 注入 fetch（测试用）
+   * @param {number} [opts.maxElements] 元素地图最多列出的数量
+   * @param {number} [opts.minElements=3] auto 模式下 UIA 少于该数则尝试 OmniParser
    */
-  constructor({ native } = {}) {
-    this.native = native; // 懒加载：首次使用时若为空则 createKoffiNative()
+  constructor({
+    native, uiaRunner, omniEndpoint, fetchImpl,
+    maxElements, minElements = 3
+  } = {}) {
+    this.native = native;
     this.origin = { x: 0, y: 0 };
+    this.uiaRunner = uiaRunner;
+    this.omniEndpoint = omniEndpoint;
+    this.fetchImpl = fetchImpl;
+    this.maxElements = maxElements ?? DEFAULT_CAP;
+    this.minElements = minElements;
+    this.#lastMap = { elements: [], total: 0, truncated: false, source: "uia" };
   }
+
+  #lastMap;
 
   async #ensureNative() {
     if (!this.native) this.native = createKoffiNative();
     return this.native;
   }
 
-  // 在线程级 DPI 上下文中执行（PER_MONITOR_AWARE_V2，拿物理像素），结束恢复。
-  // 关键：截图与鼠标动作处于同一上下文，坐标空间天然自洽，无需 DPI 换算。
+  // 线程级 DPI 上下文（PER_MONITOR_AWARE_V2），截图与动作同一上下文、坐标自洽。
   async #withThreadDpi(fn) {
     const n = await this.#ensureNative();
     if (!n.supportsThreadDpi) return await fn();
@@ -69,8 +97,8 @@ export class WindowsDriver {
     }
   }
 
-  /** 截取整个虚拟屏幕（含多显示器）。 */
-  async screenshot() {
+  /** 捕获整个虚拟屏幕，返回原始 RGBA（含多显示器）。 */
+  async #capture() {
     return await this.#withThreadDpi(async () => {
       const n = this.native;
       const originX = n.metrics(SM_XVIRTUALSCREEN);
@@ -82,9 +110,7 @@ export class WindowsDriver {
 
       const screenDC = n.getDC(null);
       if (!screenDC) throw new Error("GetDC 失败");
-      let memDC = null;
-      let bitmap = null;
-      let oldBitmap = null;
+      let memDC = null, bitmap = null, oldBitmap = null;
       try {
         memDC = n.createMemDC(screenDC);
         bitmap = n.createBitmap(screenDC, width, height);
@@ -92,26 +118,18 @@ export class WindowsDriver {
         const ok = n.bitBlt(memDC, width, height, screenDC, originX, originY);
         if (!ok) throw new Error("BitBlt 失败");
 
-        const bits = Buffer.alloc(width * height * 4);
+        const rgba = Buffer.alloc(width * height * 4);
         const bi = n.allocBitmapInfo(width, height);
-        const scanned = n.getDIBits(memDC, bitmap, height, bits, bi);
-        if (scanned === 0) throw new Error("GetDIBits 未返回任何扫描行");
+        const scanned = n.getDIBits(memDC, bitmap, height, rgba, bi);
+        if (scanned === 0) throw new Error("GetDIBits 未返回扫描行");
 
-        // GetDIBits 32bpp 内存布局为 BGRA，交换 B/R 得到 RGBA（就地转换后再编码）。
-        for (let i = 0; i < bits.length; i += 4) {
-          const b = bits[i];
-          bits[i] = bits[i + 2]; // B 位置 <- R
-          bits[i + 2] = b; // R 位置 <- B
+        // 32bpp 内存布局 BGRA，交换 B/R 得 RGBA（就地转换）。
+        for (let i = 0; i < rgba.length; i += 4) {
+          const b = rgba[i];
+          rgba[i] = rgba[i + 2];
+          rgba[i + 2] = b;
         }
-        const png = encodePNG({ width, height, rgba: bits });
-        return {
-          type: "image",
-          data: png.toString("base64"),
-          mimeType: "image/png",
-          name: "screen.png",
-          width,
-          height
-        };
+        return { width, height, rgba, origin: { x: originX, y: originY } };
       } finally {
         if (memDC && oldBitmap) n.selectObject(memDC, oldBitmap);
         if (bitmap) n.deleteObject(bitmap);
@@ -121,8 +139,63 @@ export class WindowsDriver {
     });
   }
 
+  /** 截取整个虚拟屏幕，返回图片内容。 */
+  async screenshot() {
+    const c = await this.#capture();
+    return toImageContent(encodePNG(c), "screen.png", c.width, c.height);
+  }
+
   #toAbsolute(x, y) {
     return { x: x + this.origin.x, y: y + this.origin.y };
+  }
+
+  /**
+   * 侦察当前屏幕的可交互元素（UIA 优先，OmniParser 兜底）。
+   * @param {object} [opts]
+   * @param {"auto"|"uia"|"omniparser"} [opts.backend="auto"]
+   * @param {boolean} [opts.annotate=false] true 返回带编号框的 SoM 标注图，否则返回文本清单
+   * @param {boolean} [opts.clickableOnly=true] OmniParser 结果是否只保留可点元素
+   */
+  async inspect({ backend = "auto", annotate = false, clickableOnly = true } = {}) {
+    const capture = await this.#capture();
+
+    let map = null;
+    if (backend === "uia" || backend === "auto") {
+      let uiaRaw = [];
+      try {
+        uiaRaw = await inspectViaUia({ runner: this.uiaRunner });
+      } catch {
+        uiaRaw = [];
+      }
+      map = buildElementMap(uiaRaw, "uia", { cap: this.maxElements });
+    }
+
+    const needOmni =
+      backend === "omniparser" ||
+      (backend === "auto" && map && map.total < this.minElements && this.omniEndpoint);
+    if (needOmni) {
+      const imageBase64 = encodePNG(capture).toString("base64");
+      const detections = await parseWithOmniParser({
+        endpoint: this.omniEndpoint,
+        imageBase64,
+        fetchImpl: this.fetchImpl
+      });
+      const om = buildElementMap(detections, "omniparser", {
+        cap: this.maxElements,
+        clickableOnly
+      });
+      if (backend === "omniparser" || (om.total > 0 && (!map || om.total > map.total)))
+        map = om;
+    }
+
+    if (!map) map = buildElementMap([], "uia", { cap: this.maxElements });
+    this.#lastMap = map;
+
+    if (annotate) {
+      const marked = drawSom(capture, map.elements, capture.origin);
+      return toImageContent(encodePNG(marked), "elements.png", capture.width, capture.height);
+    }
+    return describeElements(map);
   }
 
   async move(x, y) {
@@ -133,20 +206,47 @@ export class WindowsDriver {
     });
   }
 
-  /** 在 (x,y) 点击；double=true 时双击。 */
-  async click(x, y, button = "left", double = false) {
+  /**
+   * 点击：优先按 elementId（坐标取自元素 bbox 中心），否则用相对坐标 x,y。
+   * @param {object} target
+   * @param {number} [target.elementId]
+   * @param {number} [target.x]
+   * @param {number} [target.y]
+   * @param {"left"|"right"|"middle"} [target.button="left"]
+   * @param {boolean} [target.double=false]
+   */
+  async clickTarget({ elementId, x, y, button = "left", double = false } = {}) {
     const b = BUTTONS[button];
     if (!b) throw new Error(`不支持的按键：${button}`);
-    return await this.#withThreadDpi(() => {
-      const p = this.#toAbsolute(x, y);
-      this.native.setCursorPos(p.x, p.y);
+
+    let abs, label;
+    if (elementId != null) {
+      const el = findElement(this.#lastMap.elements, elementId);
+      if (!el)
+        throw new Error(`元素 #${elementId} 不存在或地图已过期，请先调用 inspect。`);
+      abs = { x: el.cx, y: el.cy };
+      label = { elementId, name: el.name };
+    } else {
+      if (x == null || y == null)
+        throw new Error("click 需要提供 elementId，或相对坐标 x,y");
+      abs = this.#toAbsolute(x, y);
+      label = { x, y };
+    }
+
+    await this.#withThreadDpi(() => {
+      this.native.setCursorPos(abs.x, abs.y);
       const clicks = double ? 2 : 1;
       for (let i = 0; i < clicks; i++) {
         this.native.mouseEvent(b.down, 0);
         this.native.mouseEvent(b.up, 0);
       }
-      return { clicked: { x, y, button, double } };
     });
+    return { clicked: { ...label, button, double } };
+  }
+
+  /** 兼容接口：在相对坐标 (x,y) 点击。 */
+  async click(x, y, button = "left", double = false) {
+    return this.clickTarget({ x, y, button, double });
   }
 
   /** 从一个点拖拽到另一个点。 */
@@ -164,7 +264,7 @@ export class WindowsDriver {
     });
   }
 
-  /** 在 (x,y) 处垂直滚动；amount 正=向上，负=向下，单位为滚轮格。 */
+  /** 在 (x,y) 处垂直滚动；amount 正=向上，负=向下，单位滚轮格。 */
   async scroll(x, y, amount) {
     const n = amount | 0;
     if (!n) throw new Error("滚动量不能为 0");
@@ -202,18 +302,12 @@ export class WindowsDriver {
         const ext = EXTENDED_VKS.has(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
         this.native.keybdEvent(vk, scan, ext | flags);
       };
-      // 按下：修饰键（书写顺序）→ 主键；抬起：主键先抬，修饰键逆序抬。
       for (const vk of modifiers) press(vk);
       for (const vk of mains) press(vk);
-      for (let i = mains.length - 1; i >= 0; i--) {
-        const vk = mains[i];
-        const ext = EXTENDED_VKS.has(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
-        press(vk, KEYEVENTF_KEYUP);
-      }
-      for (let i = modifiers.length - 1; i >= 0; i--) {
-        const vk = modifiers[i];
-        press(vk, KEYEVENTF_KEYUP);
-      }
+      for (let i = mains.length - 1; i >= 0; i--)
+        press(mains[i], KEYEVENTF_KEYUP);
+      for (let i = modifiers.length - 1; i >= 0; i--)
+        press(modifiers[i], KEYEVENTF_KEYUP);
       return { pressed: text };
     });
   }
@@ -254,7 +348,6 @@ export function createKoffiNative() {
     "int GetDIBits(void* hdc, void* hbm, uint32 start, uint32 cLines, void* lpBits, void* lpbi, uint32 usage)"
   );
 
-  // BITMAPINFOHEADER（top-down, 32bpp BI_RGB -> 内存布局 BGRA）。
   const BitmapInfoHeader = koffi.struct("BITMAPINFOHEADER", {
     biSize: "uint32",
     biWidth: "int32",
@@ -269,7 +362,6 @@ export function createKoffiNative() {
     biClrImportant: "uint32"
   });
 
-  // 可选：线程级 DPI（Win10 1607+）。不可用时降级为继承进程上下文。
   let SetThreadDpiAwarenessContext = null;
   try {
     SetThreadDpiAwarenessContext = user32.func(
@@ -279,7 +371,6 @@ export function createKoffiNative() {
     SetThreadDpiAwarenessContext = null;
   }
   const supportsThreadDpi = typeof SetThreadDpiAwarenessContext === "function";
-  // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 是值为 -4 的伪句柄。
   const dpiV2Handle = () => koffi.as(-4, "void*");
 
   return {
@@ -299,7 +390,7 @@ export function createKoffiNative() {
       koffi.alloc(BitmapInfoHeader, {
         biSize: 40,
         biWidth: w,
-        biHeight: -h, // top-down
+        biHeight: -h,
         biPlanes: 1,
         biBitCount: 32,
         biCompression: 0,

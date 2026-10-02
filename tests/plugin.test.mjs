@@ -32,18 +32,18 @@ async function withPlatform(platform, fn) {
   }
 }
 
-test("Windows 下注册 7 个可见工具、1 个 prompt、1 个 skill", async () => {
+test("Windows 下注册 8 个可见工具、1 个 prompt、1 个 skill", async () => {
   await withPlatform("win32", async () => {
     const api = fakeApi();
     await activate(api);
     const names = api.tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ["click", "drag", "key", "move", "screenshot", "scroll", "type"]);
+    assert.deepEqual(names, ["click", "drag", "inspect", "key", "move", "screenshot", "scroll", "type"]);
     // 所有工具默认可见
     assert.ok(api.tools.every((t) => t.hidden === false));
     // 每个工具都带 JSON Schema
     assert.ok(api.tools.every((t) => typeof t.inputSchema === "object"));
     assert.equal(api.prompts.length, 1);
-    assert.ok(api.prompts[0].provider.includes("坐标原点"));
+    assert.ok(api.prompts[0].provider.includes("元素地图"));
     assert.equal(api.skills.length, 1);
     assert.equal(api.skills[0].relativePath, "skills/computer-use");
     assert.equal(api.statuses.at(-1).message, "已就绪");

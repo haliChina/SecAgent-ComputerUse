@@ -197,3 +197,100 @@ test("chord：只有修饰键时报错", async () => {
   const driver = new WindowsDriver({ native });
   await assert.rejects(() => driver.chord("ctrl"));
 });
+
+// ---- v0.2：元素地图 inspect 与按编号点击 ----
+const uiaEls = [
+  {
+    name: "确定", role: "Button", automationId: "ok",
+    bbox: { x: 100, y: 100, w: 40, h: 20 },
+    cx: 120, cy: 110, enabled: true
+  }
+];
+const uiaRunner = (els) => async () => ({ stdout: JSON.stringify(els), stderr: "" });
+
+test("inspect 默认返回文本元素清单", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
+  const out = await driver.inspect();
+  assert.equal(typeof out, "string");
+  assert.match(out, /确定/);
+  assert.match(out, /#0/);
+});
+
+test("inspect annotate=true 返回带编号框的标注图", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
+  const out = await driver.inspect({ annotate: true });
+  assert.equal(out.type, "image");
+  assert.equal(out.width, 200);
+  const decoded = decodePng(Buffer.from(out.data, "base64"));
+  const i = (100 * decoded.width + 110) * 4; // 元素上边 (110,100)
+  assert.deepEqual([...decoded.rgba.subarray(i, i + 3)], [57, 255, 20]);
+});
+
+test("clickTarget 按 elementId 使用元素绝对坐标（不加虚拟原点）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150, origin: { x: -100, y: -100 } });
+  const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
+  await driver.inspect();
+  await driver.clickTarget({ elementId: 0 });
+  const move = native.calls.filter((c) => c[0] === "setCursorPos").at(-1);
+  // UIA 的 cx/cy 已是绝对物理坐标，直接 (120,110)，不能再加 origin
+  assert.deepEqual([move[1], move[2]], [120, 110]);
+});
+
+test("clickTarget 未知或过期 elementId 报错", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
+  await driver.inspect();
+  await assert.rejects(() => driver.clickTarget({ elementId: 99 }), /不存在|过期/);
+});
+
+test("clickTarget 无 elementId 且无坐标时报错；坐标路径仍加原点", async () => {
+  const native = makeFakeNative({ w: 200, h: 150, origin: { x: -50, y: 0 } });
+  const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
+  await assert.rejects(() => driver.clickTarget({}), /elementId|x,y/);
+  await driver.screenshot(); // 先捕获以同步虚拟原点 (-50,0)
+  await driver.clickTarget({ x: 10, y: 10 });
+  const move = native.calls.filter((c) => c[0] === "setCursorPos").at(-1);
+  assert.deepEqual([move[1], move[2]], [-40, 10]);
+});
+
+test("inspect auto：UIA 元素过少且配置 OmniParser 时自动回退", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const omniDetections = Array.from({ length: 5 }, (_, i) => ({
+    type: "icon",
+    bbox: [i * 20, 50, i * 20 + 15, 70],
+    interactivity: true,
+    content: "d" + i
+  }));
+  const fetchImpl = async () => ({
+    ok: true, status: 200,
+    json: async () => ({ parsed_content_list: omniDetections })
+  });
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner(uiaEls), // 仅 1 个 < minElements(3)
+    omniEndpoint: "http://127.0.0.1:8000",
+    fetchImpl
+  });
+  const out = await driver.inspect();
+  assert.match(out, /OmniParser/);
+  assert.match(out, /d4/);
+});
+
+test("inspect backend=omniparser 直接使用视觉后端", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const fetchImpl = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      elements: [{ type: "icon", bbox: [10, 10, 30, 30], interactivity: true, content: "x" }]
+    })
+  });
+  const driver = new WindowsDriver({
+    native, omniEndpoint: "http://x", fetchImpl,
+    uiaRunner: uiaRunner(uiaEls)
+  });
+  const out = await driver.inspect({ backend: "omniparser" });
+  assert.match(out, /OmniParser/);
+  assert.match(out, /"x"/);
+});
