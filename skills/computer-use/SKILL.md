@@ -30,12 +30,13 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/Omni
 
 | 工具 key | 参数 | 作用 |
 |---|---|---|
+| `computer-use__settings` | 无 | 在系统浏览器打开设置控制台（参数 / OmniParser 一键安装 / 思考提醒） |
 | `computer-use__screenshot` | 无 | 截屏返回图片，观察整体 / 验证结果 |
 | `computer-use__inspect` | 可选 `backend`(auto/uia/omniparser)、`annotate`(布尔)、`clickableOnly`(布尔) | 返回元素清单文本；`annotate=true` 返回带编号框的标注图 |
 | `computer-use__click` | **elementId**（优先）；或 `x,y` 兜底；可选 `button`、`double` | 点击 / 双击目标元素 |
 | `computer-use__move` | `x,y` | 移动指针，不点击 |
 | `computer-use__drag` | `from:{x,y}`、`to:{x,y}`；可选 `button` | 按住拖拽 |
-| `computer-use__scroll` | `x,y,amount` | amount 正向上、负向下 |
+| `computer-use__scroll` | `x,y`；可选 `amount`（缺省用设置默认值），正向上、负向下 | 滚动滚轮 |
 | `computer-use__type` | `text` | 在聚焦处输入文本（支持中文） |
 | `computer-use__key` | `keys` | 组合键，如 `ctrl+c`、`alt+tab`、`enter`、`f5` |
 
@@ -52,6 +53,14 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/Omni
 - **UIA（默认）**：Windows UI Automation，免费精确，覆盖 Win32/WPF/WinForms/多数 Qt/Electron；
 - **OmniParser（可选）**：当 UIA 元素过少（自绘界面、游戏、Canvas），在已启动 OmniParser HTTP 服务时用 `inspect(backend="omniparser")`；
 - UIA 已知盲区：自绘 UI、游戏、远程桌面内、管理员窗口（需提权或虚拟机）。
+
+## 设置控制台与思考提醒
+
+- 用户要求改配置、调参数、安装视觉模型、或觉得思考太久时，调用 `settings` 打开设置控制台；
+- 控制台可一键安装并启动本地 OmniParser（自动建虚拟环境、装依赖、下权重、拉起服务），也可开关其兜底、设置开机自启；
+- 思考提醒：系统会在任务开始时给出“思考时间预算 / 最大动作轮次”，当动作轮次达到上限、或两次动作间隔过长（疑似卡思考）时，在工具结果中温和提醒尽快收敛；
+- 收到思考提醒后，立即给出下一步动作或结论；确实无法继续就直接向用户说明卡点，不要继续反复权衡；
+- “自动降思考力度 / 自动切换模型”需宿主核心层支持，当前版本仅做温和提醒。
 
 ## 约束
 

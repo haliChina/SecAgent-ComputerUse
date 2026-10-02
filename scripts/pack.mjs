@@ -16,7 +16,7 @@ const stage = path.join(releaseDir, "stage");
 const outZip = path.join(releaseDir, `computer-use-${version}.zip`);
 
 const FILES = ["secagent-plugin.json", "package.json", "main.mjs", "README.md"];
-const DIRS = ["driver", "skills", "assets", "node_modules"];
+const DIRS = ["driver", "settings", "omniparser", "reasoning", "skills", "assets", "node_modules"];
 
 if (!fs.existsSync(path.join(root, "node_modules", "koffi"))) {
   throw new Error("未找到 node_modules/koffi，请先运行 npm install 再打包。");
