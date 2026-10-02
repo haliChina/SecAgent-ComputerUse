@@ -2,7 +2,7 @@
   "apiVersion": 1,
   "id": "computer-use",
   "name": "Computer Use",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "main": "main.mjs",
   "icon": "assets/icon.png",
   "description": "让 Agent 操控 Windows：元素侦察（UI Automation/OmniParser 一键安装）、按编号点击、截屏、输入、组合键、滚动、拖拽，并内置可调参数设置控制台。需配合视觉多模态模型。",

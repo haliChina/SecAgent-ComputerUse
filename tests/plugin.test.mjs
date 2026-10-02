@@ -34,9 +34,9 @@ async function withPlatform(platform, fn) {
   }
 }
 
-const EXPECTED_TOOLS = ["click", "drag", "inspect", "key", "move", "screenshot", "scroll", "settings", "type"];
+const EXPECTED_TOOLS = ["click", "doctor", "drag", "inspect", "key", "move", "screenshot", "scroll", "settings", "type"];
 
-test("Windows 下注册 9 个可见工具、1 个 prompt、1 个 skill、1 个设置 handler", async () => {
+test("Windows 下注册 10 个可见工具、1 个 prompt、1 个 skill、1 个设置 handler", async () => {
   await withPlatform("win32", async () => {
     const api = fakeApi();
     const dispose = await activate(api);
@@ -78,7 +78,7 @@ test("非 Windows 平台仍注册工具，但状态提示动作仅可在 Windows
     const api = fakeApi();
     const dispose = await activate(api);
     try {
-      assert.equal(api.tools.length, 9);
+      assert.equal(api.tools.length, 10);
       assert.equal(api.statuses.at(-1).state, "ready");
       assert.match(api.statuses.at(-1).message, /仅可在 Windows/);
     } finally {

@@ -37,6 +37,9 @@ export function createOmniParserManager(options = {}) {
   const spawnImpl = options.spawnImpl ?? defaultSpawn;
   const serverTemplate = options.serverTemplate || "";
   const log = options.log || (() => {});
+  // 镜像配置：安装时动态读取（设置控制台可随时修改）
+  const getHfMirror = typeof options.getHfMirror === "function" ? options.getHfMirror : () => "";
+  const getPipIndexUrl = typeof options.getPipIndexUrl === "function" ? options.getPipIndexUrl : () => "";
 
   const isWin = process.platform === "win32";
   const venvDir = path.join(baseDir, "venv");
@@ -119,6 +122,8 @@ export function createOmniParserManager(options = {}) {
 
   async function install(onProgress = () => {}) {
     if (phase === "installing") throw new Error("正在安装中");
+    const hfMirror = String(getHfMirror() || "").trim();
+    const pipIndexUrl = String(getPipIndexUrl() || "").trim();
     setPhase("installing", "检测 Python…", 2);
     onProgress({ phase, message, progress });
     try {
@@ -135,7 +140,12 @@ export function createOmniParserManager(options = {}) {
       const vpy = venvPython();
 
       setPhase("installing", "升级 pip…", 12); onProgress({ phase, message, progress });
-      await run(vpy, ["-m", "pip", "install", "--upgrade", "pip"]);
+      const pipIndexArgs = pipIndexUrl ? ["-i", pipIndexUrl] : [];
+      try {
+        await run(vpy, ["-m", "pip", "install", "--upgrade", "pip", ...pipIndexArgs]);
+      } catch (error) {
+        throw new Error(`pip 升级失败：${error.message}。国内网络可在设置中填写 pip 镜像源后重试。`);
+      }
 
       setPhase("installing", "下载 OmniParser 源码…", 18); onProgress({ phase, message, progress });
       await fetchSource();
@@ -143,16 +153,28 @@ export function createOmniParserManager(options = {}) {
       setPhase("installing", "安装依赖（torch / transformers / ultralytics，较慢）…", 30);
       onProgress({ phase, message, progress });
       const requirements = path.join(srcDir, "requirements.txt");
-      if (fs.existsSync(requirements)) {
-        await run(vpy, ["-m", "pip", "install", "-r", requirements], { maxBuffer: undefined });
+      try {
+        if (fs.existsSync(requirements)) {
+          await run(vpy, ["-m", "pip", "install", "-r", requirements, ...pipIndexArgs], { maxBuffer: undefined });
+        }
+        await run(vpy, ["-m", "pip", "install", "huggingface_hub", "fastapi", "uvicorn", "python-multipart", ...pipIndexArgs]);
+      } catch (error) {
+        throw new Error(`依赖安装失败：${error.message}。国内网络可在设置中填写 pip 镜像源（如 https://pypi.tuna.tsinghua.edu.cn/simple）后重试。`);
       }
-      await run(vpy, ["-m", "pip", "install", "huggingface_hub", "fastapi", "uvicorn", "python-multipart"]);
 
       setPhase("installing", "下载模型权重（约数百 MB）…", 70); onProgress({ phase, message, progress });
       if (!fs.existsSync(path.join(weightsDir, "icon_detect"))) {
         fs.mkdirSync(weightsDir, { recursive: true });
-        await run(vpy, ["-c", SNAPSHOT_SNIPPET.replace("%r", JSON.stringify(OMNI_HF_REPO))],
-          { env: { ...process.env, OMNI_W_TARGET: weightsDir } });
+        const hfEnv = hfMirror ? { HF_ENDPOINT: hfMirror } : {};
+        try {
+          await run(vpy, ["-c", SNAPSHOT_SNIPPET.replace("%r", JSON.stringify(OMNI_HF_REPO))],
+            { env: { ...process.env, OMNI_W_TARGET: weightsDir, ...hfEnv } });
+        } catch (error) {
+          throw new Error(
+            `权重下载失败：${error.message}` +
+            (hfMirror ? "。请检查镜像地址是否可用。" : "。国内网络可在设置中填写 HuggingFace 镜像（如 https://hf-mirror.com）后重试。")
+          );
+        }
       }
 
       setPhase("installing", "写入启动脚本…", 92); onProgress({ phase, message, progress });
@@ -186,11 +208,17 @@ export function createOmniParserManager(options = {}) {
     setPhase("starting", "启动本地服务（首次加载模型较慢）…");
     intentionalStop = false;
     const vpy = venvPython();
+    const hfMirror = String(getHfMirror() || "").trim();
     child = spawnImpl(vpy,
       [serverFile, "--host", url.hostname, "--port", url.port || "8000"],
       {
         cwd: baseDir,
-        env: { ...process.env, OMNI_WEIGHTS_DIR: weightsDir, OMNI_SRC_DIR: srcDir },
+        env: {
+          ...process.env,
+          OMNI_WEIGHTS_DIR: weightsDir,
+          OMNI_SRC_DIR: srcDir,
+          ...(hfMirror ? { HF_ENDPOINT: hfMirror } : {})
+        },
         detached: true,
         windowsHide: true
       });

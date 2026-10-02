@@ -347,6 +347,17 @@ export class WindowsDriver {
 // ---------------------------------------------------------------------------
 // 生产实现：koffi FFI。仅在 Windows 真正调用系统 API 时加载。
 // ---------------------------------------------------------------------------
+/** 加载 user32/gdi32 等系统库，失败时给出可操作的中文报错（而非 koffi 原始异常）。 */
+function loadSystemLib(koffi, name) {
+  try {
+    return koffi.load(name);
+  } catch (error) {
+    throw new Error(
+      `加载 Windows 系统库失败（${name}）：${error?.message ?? error}。请确认在 Windows 上运行，且插件为官方发布包（内含 node_modules/koffi/win32_x64）。`
+    );
+  }
+}
+
 export function createKoffiNative() {
   let koffi;
   try {
@@ -356,8 +367,8 @@ export function createKoffiNative() {
       "缺少依赖 koffi。请重新安装本插件（发布包应包含 node_modules/koffi），或在插件目录执行 npm install。"
     );
   }
-  const user32 = koffi.load("user32.dll");
-  const gdi32 = koffi.load("gdi32.dll");
+  const user32 = loadSystemLib(koffi, "user32.dll");
+  const gdi32 = loadSystemLib(koffi, "gdi32.dll");
 
   const GetDC = user32.func("void* GetDC(void* hWnd)");
   const ReleaseDC = user32.func("int ReleaseDC(void* hWnd, void* hDC)");

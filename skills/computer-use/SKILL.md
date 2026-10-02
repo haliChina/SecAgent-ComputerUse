@@ -30,6 +30,7 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/Omni
 
 | 工具 key | 参数 | 作用 |
 |---|---|---|
+| `computer-use__doctor` | 无 | **首次使用 / 动作失败时先调用**：环境自检，失败项给出修复建议 |
 | `computer-use__settings` | 无 | 在系统浏览器打开设置控制台（参数 / OmniParser 一键安装 / 思考提醒） |
 | `computer-use__screenshot` | 无 | 截屏返回图片，观察整体 / 验证结果 |
 | `computer-use__inspect` | 可选 `backend`(auto/uia/omniparser)、`annotate`(布尔)、`clickableOnly`(布尔) | 返回元素清单文本；`annotate=true` 返回带编号框的标注图 |
@@ -42,6 +43,7 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/Omni
 
 ## 标准流程
 
+0. 首次使用或动作失败时，先 `doctor` 自检：按修复建议处理，通过后再干活；
 1. `screenshot` 观察整体布局；
 2. `inspect` 获取可交互元素清单（视觉不确定时用 `inspect(annotate=true)` 看编号框）；
 3. 用 `click({elementId})` 点击所选元素，或 `type` / `key`；

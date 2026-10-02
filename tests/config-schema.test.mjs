@@ -70,3 +70,20 @@ test("fieldFor 能查到字段", () => {
   assert.equal(fieldFor("maxRounds").group, "reasoning");
   assert.equal(fieldFor("nope"), undefined);
 });
+
+test("镜像字段归一化：合法 URL 保留、非法回退、去尾斜杠", () => {
+  assert.equal(normalizeField("hfMirror", ""), "");
+  assert.equal(normalizeField("hfMirror", "https://hf-mirror.com"), "https://hf-mirror.com");
+  assert.equal(normalizeField("hfMirror", "https://hf-mirror.com/"), "https://hf-mirror.com");
+  assert.equal(normalizeField("hfMirror", "not-a-url"), "");
+  assert.equal(normalizeField("hfMirror", "ftp://x"), "");
+  assert.equal(normalizeField("pipIndexUrl", "https://pypi.tuna.tsinghua.edu.cn/simple/"),
+    "https://pypi.tuna.tsinghua.edu.cn/simple");
+  assert.equal(normalizeField("pipIndexUrl", "notaurl"), "");
+});
+
+test("mergeConfig 保留镜像字段", () => {
+  const { config } = mergeConfig({ hfMirror: "https://hf-mirror.com", pipIndexUrl: "" });
+  assert.equal(config.hfMirror, "https://hf-mirror.com");
+  assert.equal(config.pipIndexUrl, "");
+});

@@ -1,6 +1,8 @@
 // SecAgent Computer Use 插件入口。
 // 由宿主动态 import 并调用 activate(api)。
 import { WindowsDriver } from "./driver/win-driver.mjs";
+import { createKoffiNative } from "./driver/win-driver.mjs";
+import { runDoctor, formatDoctorReport } from "./driver/doctor.mjs";
 import { mergeConfig, describeSettings, DEFAULT_CONFIG } from "./settings/config-schema.mjs";
 import { createSettingsServer } from "./settings/settings-server.mjs";
 import { CONSOLE_HTML } from "./settings/console-page.mjs";
@@ -26,6 +28,7 @@ function asInt(value, name) {
 }
 
 const STATIC_RULES = `## 电脑操作规则（Computer Use）
+- 首次使用或动作失败时，先运行 doctor 自检：逐项验证环境并按修复建议处理，通过后再干活。
 - 优先“元素地图”而非裸坐标：操作前先 inspect 获取可交互元素清单（编号/名称/角色），点击时给 click 传 elementId，坐标由系统给出，不要自行估计像素。
 - 标准节奏：screenshot 观察整体 → inspect 拿到元素编号 → click(elementId) 或 type/key → 再 screenshot 验证，逐步推进。
 - 需要视觉核对时用 inspect(annotate=true) 查看带编号框的标注图；界面一旦变化，元素地图即过期，需重新 inspect。
@@ -56,9 +59,12 @@ export async function activate(api) {
   const driver = new WindowsDriver({ configProvider: readConfig });
 
   // OmniParser 一键安装管理器（数据在用户主目录，不随插件包分发）。
+  // 镜像地址从设置动态读取，安装/启动时生效。
   const manager = createOmniParserManager({
     endpoint: initial.omniEndpoint,
-    serverTemplate: SERVER_PY
+    serverTemplate: SERVER_PY,
+    getHfMirror: () => readConfig().hfMirror,
+    getPipIndexUrl: () => readConfig().pipIndexUrl
   });
 
   // 本地设置控制台。
@@ -138,7 +144,30 @@ export async function activate(api) {
     }
   );
 
-  // 1) 截屏
+  // 1) 环境自检：安装后先运行，失败项会给出修复建议
+  api.registerTool(
+    {
+      name: "doctor",
+      description:
+        "安装后先运行本工具做环境自检：逐项验证操作系统、系统库加载、屏幕探针、UIA/PowerShell、Python、OmniParser 状态。首次使用或动作失败时先调用，失败项会给出修复建议。",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      hidden: false
+    },
+    guarded("doctor", async () => {
+      const result = await runDoctor({
+        loadNative: () => createKoffiNative(),
+        detectPython: () => manager.detectPython(),
+        getOmniStatus: () => manager.status()
+      });
+      return {
+        ok: result.ok,
+        report: formatDoctorReport(result),
+        checks: result.checks
+      };
+    })
+  );
+
+  // 2) 截屏
   api.registerTool(
     {
       name: "screenshot",
@@ -150,7 +179,7 @@ export async function activate(api) {
     guarded("screenshot", async () => await driver.screenshot())
   );
 
-  // 2) 元素侦察
+  // 3) 元素侦察
   api.registerTool(
     {
       name: "inspect",
@@ -182,7 +211,7 @@ export async function activate(api) {
     )
   );
 
-  // 3) 点击
+  // 4) 点击
   api.registerTool(
     {
       name: "click",
@@ -212,7 +241,7 @@ export async function activate(api) {
     })
   );
 
-  // 4) 移动
+  // 5) 移动
   api.registerTool(
     {
       name: "move",
@@ -223,7 +252,7 @@ export async function activate(api) {
     guarded("move", async (a) => await driver.move(asInt(a.x, "x"), asInt(a.y, "y")))
   );
 
-  // 5) 拖拽
+  // 6) 拖拽
   api.registerTool(
     {
       name: "drag",
@@ -253,7 +282,7 @@ export async function activate(api) {
     )
   );
 
-  // 6) 滚动（amount 缺省取设置 defaultScrollSteps）
+  // 7) 滚动（amount 缺省取设置 defaultScrollSteps）
   api.registerTool(
     {
       name: "scroll",
@@ -281,7 +310,7 @@ export async function activate(api) {
     )
   );
 
-  // 7) 输入文本
+  // 8) 输入文本
   api.registerTool(
     {
       name: "type",
@@ -300,7 +329,7 @@ export async function activate(api) {
     })
   );
 
-  // 8) 组合键
+  // 9) 组合键
   api.registerTool(
     {
       name: "key",

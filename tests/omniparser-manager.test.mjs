@@ -114,3 +114,83 @@ test("未安装直接 start 报错", async () => {
   const { manager } = makeHarness({ baseDir });
   await assert.rejects(() => manager.start(), /尚未安装/);
 });
+
+function makeMirrorHarness({ baseDir, hfMirror = "", pipIndexUrl = "" } = {}) {
+  const execCalls = [];
+  const execImpl = (cmd, args, opts) => {
+    execCalls.push({ cmd, args, opts });
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const manager = createOmniParserManager({
+    baseDir,
+    execImpl,
+    spawnImpl: (cmd, args, opts) => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {}, _opts: opts }),
+    fetchImpl: async () => ({ ok: false }),
+    serverTemplate: "PYCODE",
+    getHfMirror: () => hfMirror,
+    getPipIndexUrl: () => pipIndexUrl,
+    log() {}
+  });
+  return { manager, execCalls };
+}
+
+test("配置镜像后：pip 走 -i，权重下载走 HF_ENDPOINT", async () => {
+  const baseDir = tmpDir();
+  const { manager, execCalls } = makeMirrorHarness({
+    baseDir,
+    hfMirror: "https://hf-mirror.com",
+    pipIndexUrl: "https://pypi.tuna.tsinghua.edu.cn/simple"
+  });
+  await manager.install();
+
+  const pipCalls = execCalls.filter((c) => c.args && c.args[0] === "-m" && c.args[1] === "pip");
+  assert.ok(pipCalls.length > 0);
+  for (const c of pipCalls) {
+    const i = c.args.indexOf("-i");
+    assert.ok(i !== -1 && c.args[i + 1] === "https://pypi.tuna.tsinghua.edu.cn/simple");
+  }
+  const weightCall = execCalls.find((c) =>
+    c.args && c.args.some((a) => String(a).includes("snapshot_download")));
+  assert.ok(weightCall, "应有权重下载调用");
+  assert.equal(weightCall.opts.env.HF_ENDPOINT, "https://hf-mirror.com");
+  assert.ok(weightCall.opts.env.OMNI_W_TARGET.endsWith("weights"));
+});
+
+test("不配镜像：不传 HF_ENDPOINT / -i", async () => {
+  const baseDir = tmpDir();
+  const { manager, execCalls } = makeMirrorHarness({ baseDir });
+  await manager.install();
+  const weightCall = execCalls.find((c) =>
+    c.args && c.args.some((a) => String(a).includes("snapshot_download")));
+  assert.ok(weightCall);
+  assert.equal(weightCall.opts.env.HF_ENDPOINT, undefined);
+  const pipCalls = execCalls.filter((c) => c.args && c.args[0] === "-m" && c.args[1] === "pip");
+  assert.ok(pipCalls.every((c) => !c.args.includes("-i")));
+});
+
+test("权重下载失败且无镜像：提示填写 HuggingFace 镜像", async () => {
+  const baseDir = tmpDir();
+  const execImpl = (cmd, args) => {
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    if (list.some((x) => String(x).includes("snapshot_download"))) {
+      return Promise.resolve({ code: 1, stdout: "", stderr: "network unreachable" });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl,
+    spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
+    fetchImpl: async () => ({ ok: false }),
+    serverTemplate: "PYCODE",
+    log() {}
+  });
+  await assert.rejects(() => manager.install(), /HuggingFace 镜像/);
+  assert.equal(manager.status().phase, "error");
+});

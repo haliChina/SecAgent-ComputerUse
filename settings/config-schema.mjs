@@ -37,6 +37,10 @@ export const SETTING_FIELDS = [
     label: "OmniParser 服务地址", hint: "一键安装会自动填写；也可指向你自己部署的服务。", effect: "immediate" },
   { key: "omniAutoStart", group: "omniparser", type: "boolean", default: false,
     label: "SecAgent 启动时自动拉起服务", hint: "已安装后生效，会在后台启动本地服务。", effect: "immediate" },
+  { key: "hfMirror", group: "omniparser", type: "string", default: "",
+    label: "HuggingFace 镜像", hint: "国内下载权重卡住时填写，如 https://hf-mirror.com；留空使用官方源。", effect: "immediate" },
+  { key: "pipIndexUrl", group: "omniparser", type: "string", default: "",
+    label: "pip 镜像源", hint: "国内安装依赖缓慢时填写，如 https://pypi.tuna.tsinghua.edu.cn/simple；留空使用官方源。", effect: "immediate" },
 
   // —— 思考提醒 ——
   { key: "nudgeEnabled", group: "reasoning", type: "boolean", default: true,
@@ -93,8 +97,9 @@ function coerceNumber(field, value) {
 
 function coerceString(field, value) {
   if (typeof value !== "string") return undefined;
-  const text = value.trim();
-  if (field.key === "omniEndpoint") {
+  const isUrlField = field.key === "omniEndpoint" || field.key === "hfMirror" || field.key === "pipIndexUrl";
+  const text = isUrlField ? value.trim().replace(/\/+$/, "") : value.trim();
+  if (isUrlField && text !== "") {
     try {
       const url = new URL(text);
       if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
