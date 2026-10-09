@@ -202,7 +202,8 @@ export function createOmniParserManager(options = {}) {
   }
 
   async function start() {
-    if (phase === "running" && child) return;
+    // starting 也挡：健康检查窗口内重入会双 spawn，两个进程抢同一端口
+    if ((phase === "running" || phase === "starting") && child) return;
     if (!fs.existsSync(markerFile)) throw new Error("尚未安装 OmniParser");
     const url = new URL(endpoint);
     setPhase("starting", "启动本地服务（首次加载模型较慢）…");
@@ -238,6 +239,10 @@ export function createOmniParserManager(options = {}) {
       await sleep(2000);
     }
     setPhase("error", `服务未在超时内就绪：${served.slice(-400)}`);
+    // 超时要清理 detached 进程，否则它继续占着端口，下次 start 直接撞端口失败
+    intentionalStop = true;
+    try { child?.kill(); } catch { /* ignore */ }
+    child = null;
     throw new Error(message);
   }
 

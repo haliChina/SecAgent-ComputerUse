@@ -10,14 +10,20 @@ const MAX_BODY = 128 * 1024;
 
 function defaultOpenBrowser(url) {
   const platform = process.platform;
-  if (platform === "win32") {
-    // start 的标题参数留空，URL 加引号以容纳 & 与 ?
-    defaultSpawn("cmd", ["/c", "start", "", url], { windowsHide: true });
-  } else if (platform === "darwin") {
-    defaultSpawn("open", [url], { windowsHide: true });
-  } else {
-    defaultSpawn("xdg-open", [url], { windowsHide: true });
-  }
+  // 无浏览器 opener 的环境（无头/精简系统）spawn 会发异步 'error' 事件，
+  // 未监听就是 uncaughtException；控制台 URL 会随工具结果返回，可手动打开。
+  let child;
+  try {
+    if (platform === "win32") {
+      // start 的标题参数留空，URL 加引号以容纳 & 与 ?
+      child = defaultSpawn("cmd", ["/c", "start", "", url], { windowsHide: true });
+    } else if (platform === "darwin") {
+      child = defaultSpawn("open", [url], { windowsHide: true });
+    } else {
+      child = defaultSpawn("xdg-open", [url], { windowsHide: true });
+    }
+  } catch { return; }
+  child?.on?.("error", () => {});
 }
 
 export function createSettingsServer(options = {}) {
