@@ -294,7 +294,7 @@ export async function activate(api) {
     {
       name: "launch",
       description:
-        "启动应用或打开文件（detached，不阻塞）。例如 launch('notepad')。启动后建议 wait 再 screenshot。",
+        "启动应用（detached，不阻塞）。仅支持可执行文件（如 notepad、cmd、explorer）；打开文档/文件夹可用 explorer <路径>。例如 launch('notepad')。启动后建议 wait 再 screenshot。",
       inputSchema: {
         type: "object",
         additionalProperties: false,

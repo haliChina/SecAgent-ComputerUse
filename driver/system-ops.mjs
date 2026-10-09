@@ -131,14 +131,52 @@ Write-Output (ConvertTo-Json ([ordered]@{ ok = $true; length = ${String(text ?? 
 }
 
 /**
- * 启动应用/打开文件（detached，不阻塞宿主）。
+ * 启动应用（detached，不阻塞宿主）。
+ * 注意：仅支持可执行文件（PE）。spawn 失败（如 ENOENT）以异步 'error' 事件到达，
+ * 未监听就是 uncaughtException、可能带崩宿主，因此返回 Promise 并转为友好报错。
  * @param {{command:string, args?:string[], spawnImpl?:Function}} opts
+ * @returns {Promise<{launched:string, args:string[], pid:number|null}>}
  */
 export function launchApp({ command, args = [], spawnImpl } = {}) {
   const target = String(command ?? "").trim();
   if (!target) throw new Error("launch 需要 command（可执行文件名或文件路径）");
   const spawn = spawnImpl ?? spawn;
-  const child = spawn(target, args, { detached: true, stdio: "ignore" });
-  child.unref?.();
-  return { launched: target, args, pid: child.pid ?? null };
+  let child;
+  try {
+    child = spawn(target, args, { detached: true, stdio: "ignore" });
+  } catch (error) {
+    return Promise.reject(new Error(launchErrorMessage(target, error)));
+  }
+  // 兼容无事件接口的注入实现（测试）
+  if (!child || typeof child.once !== "function") {
+    child?.unref?.();
+    return Promise.resolve({ launched: target, args, pid: child?.pid ?? null });
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    child.once("spawn", () => {
+      if (settled) return;
+      settled = true;
+      child.unref?.();
+      resolve({ launched: target, args, pid: child.pid ?? null });
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(launchErrorMessage(target, error)));
+    });
+  });
+}
+
+function launchErrorMessage(target, error) {
+  const code = error?.code;
+  let hint;
+  if (code === "ENOENT") {
+    hint = "找不到该程序。请确认名称或路径正确；注意 launch 只能启动可执行文件（如 notepad、cmd、explorer），打开文档/文件夹请改用 explorer <路径> 或先启动对应程序。";
+  } else if (code === "EACCES") {
+    hint = "没有执行权限。";
+  } else {
+    hint = error?.message ?? String(error);
+  }
+  return `启动失败（${target}）：${hint}`;
 }
