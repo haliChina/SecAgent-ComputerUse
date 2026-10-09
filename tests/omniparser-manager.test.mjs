@@ -194,3 +194,114 @@ test("权重下载失败且无镜像：提示填写 HuggingFace 镜像", async (
   await assert.rejects(() => manager.install(), /HuggingFace 镜像/);
   assert.equal(manager.status().phase, "error");
 });
+
+// ---- 实机反馈：Python 3.13+ 一键安装 numpy 源码编译失败（无 C 编译器）----
+// 根因：上游 OmniParser 钉死 numpy==1.26.4，只有 3.9~3.12 的预编译包。
+
+function makeVersionHarness(baseDir, probe) {
+  const execCalls = [];
+  const execImpl = (cmd, args) => {
+    execCalls.push({ cmd, args });
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      const version = probe(cmd);
+      return version
+        ? Promise.resolve({ code: 0, stdout: version + "\n", stderr: "" })
+        : Promise.resolve({ code: 1, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl,
+    spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
+    fetchImpl: async () => ({ ok: false }),
+    serverTemplate: "PYCODE",
+    log() {}
+  });
+  return { manager, execCalls };
+}
+
+test("只有 Python 3.13：拒绝安装并说明预编译包范围，不再误指镜像", async () => {
+  const baseDir = tmpDir();
+  const { manager } = makeVersionHarness(baseDir, () => "3.13");
+  await assert.rejects(() => manager.install(), /3\.9~3\.12|预编译|winget install Python\.Python\.3\.11/);
+  assert.equal(manager.status().phase, "error");
+  assert.equal(fs.existsSync(path.join(baseDir, "venv")), false);
+});
+
+test("3.13 与 3.11 并存时优先选 3.11，不用 3.13 建 venv", async () => {
+  const baseDir = tmpDir();
+  const { manager, execCalls } = makeVersionHarness(baseDir, (cmd) => {
+    // 第一个候选（win: py -3.11 / linux: python3.11）返回 3.11，其余版本探测一律 3.13
+    const isFirst = cmd === "py" || cmd === "python3.11";
+    return isFirst ? "3.11" : "3.13";
+  });
+  await manager.install();
+  assert.equal(manager.status().phase, "installed");
+  const venvCall = execCalls.find((c) => c.args && c.args.includes("venv") && c.args.includes("-m"));
+  assert.ok(venvCall, "应执行 venv 创建");
+  // venv 创建用的必须是首个 3.11 候选，而不是裸 python（3.13）
+  const firstProbe = execCalls.find((c) => c.args && c.args.some((x) => String(x).includes("import sys")));
+  assert.ok(firstProbe, "应有版本探测");
+  assert.equal(venvCall.cmd, firstProbe.cmd, "venv 应使用首个 3.11 候选");
+  assert.notEqual(venvCall.cmd, "python");
+  assert.notEqual(venvCall.cmd, "python3");
+});
+
+test("残留的 3.13 venv：自动删除并按检测到的 3.11 重建", async () => {
+  const baseDir = tmpDir();
+  const venvPy = path.join(baseDir, "venv", process.platform === "win32" ? "Scripts" : "bin",
+    process.platform === "win32" ? "python.exe" : "python");
+  fs.mkdirSync(path.dirname(venvPy), { recursive: true });
+  fs.writeFileSync(venvPy, "");
+  let venvProbed = false;
+  const execCalls = [];
+  const execImpl = (cmd, args) => {
+    execCalls.push({ cmd, args });
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      if (String(cmd).includes(path.join("venv"))) { venvProbed = true; return Promise.resolve({ code: 0, stdout: "3.13\n", stderr: "" }); }
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl,
+    spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
+    fetchImpl: async () => ({ ok: false }),
+    serverTemplate: "PYCODE",
+    log() {}
+  });
+  await manager.install();
+  assert.equal(manager.status().phase, "installed");
+  assert.equal(venvProbed, true, "应探测残留 venv 的版本");
+  assert.ok(execCalls.some((c) => c.args && c.args.includes("venv") && c.args.includes("-m")), "应重建 venv");
+});
+
+test("依赖编译失败（无 C 编译器）：提示 Python 版本问题而不是镜像源", async () => {
+  const baseDir = tmpDir();
+  fs.mkdirSync(path.join(baseDir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(baseDir, "src", "requirements.txt"), "numpy==1.26.4\ntorch\n");
+  const execImpl = (cmd, args) => {
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    if (list.some((x) => String(x) === "install") && list.some((x) => String(x) === "-r")) {
+      return Promise.resolve({
+        code: 1, stdout: "",
+        stderr: "clang-cl /? gave [WinError 2] ... metadata-generation-failed ... meson-log.txt"
+      });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl,
+    spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
+    fetchImpl: async () => ({ ok: false }),
+    serverTemplate: "PYCODE",
+    log() {}
+  });
+  await assert.rejects(() => manager.install(), /不是网络问题|预编译|3\.10~3\.12/);
+  assert.equal(manager.status().phase, "error");
+});
