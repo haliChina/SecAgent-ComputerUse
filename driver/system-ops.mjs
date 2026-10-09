@@ -5,7 +5,7 @@
 // 写进去就是不可测代码。这里统一复用已经过测试的
 // “PowerShell + -EncodedCommand(UTF-16LE) + JSON”通道（见 uia-inspect.mjs），
 // runner 可注入，因此全部逻辑都能在任意平台跑单测。
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn as defaultSpawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -140,10 +140,13 @@ Write-Output (ConvertTo-Json ([ordered]@{ ok = $true; length = ${String(text ?? 
 export function launchApp({ command, args = [], spawnImpl } = {}) {
   const target = String(command ?? "").trim();
   if (!target) throw new Error("launch 需要 command（可执行文件名或文件路径）");
-  const spawn = spawnImpl ?? spawn;
+  // 注意：局部名不能叫 spawn——会遮蔽顶部 import 并落入自身 TDZ，
+  // “const spawn = spawnImpl ?? spawn” 在生产路径（不注入 spawnImpl）必抛
+  // “Cannot access 'spawn' before initialization”（注入 fake 的测试因 ?? 短路而全绿）。
+  const spawnFn = spawnImpl ?? defaultSpawn;
   let child;
   try {
-    child = spawn(target, args, { detached: true, stdio: "ignore" });
+    child = spawnFn(target, args, { detached: true, stdio: "ignore" });
   } catch (error) {
     return Promise.reject(new Error(launchErrorMessage(target, error)));
   }

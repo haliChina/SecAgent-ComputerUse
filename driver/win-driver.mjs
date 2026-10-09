@@ -462,14 +462,28 @@ function loadSystemLib(koffi, name) {
   }
 }
 
-export function createKoffiNative() {
+/**
+ * koffi 原生层工厂。**同进程必须幂等**：koffi 的具名类型（如 BITMAPINFOHEADER）
+ * 在模块全局注册，第二次调用会抛 “Duplicate type name” —— doctor 与 driver
+ * 是两条独立加载路径（doctor 每次 loadNative，driver 惰性 #ensureNative），
+ * 无缓存时真实时序是：第一次 doctor 全绿，随后 screenshot/key/inspect 全部失败。
+ * 因此缓存单例；koffiImpl 仅供测试注入 fake。
+ */
+let cachedKoffiNative = null;
+
+export function createKoffiNative(koffiImpl) {
+  if (cachedKoffiNative) return cachedKoffiNative;
   let koffi;
-  try {
-    koffi = createRequire(import.meta.url)("koffi");
-  } catch {
-    throw new Error(
-      "缺少依赖 koffi。请重新安装本插件（发布包应包含 node_modules/koffi），或在插件目录执行 npm install。"
-    );
+  if (koffiImpl) {
+    koffi = koffiImpl;
+  } else {
+    try {
+      koffi = createRequire(import.meta.url)("koffi");
+    } catch {
+      throw new Error(
+        "缺少依赖 koffi。请重新安装本插件（发布包应包含 node_modules/koffi），或在插件目录执行 npm install。"
+      );
+    }
   }
   const user32 = loadSystemLib(koffi, "user32.dll");
   const gdi32 = loadSystemLib(koffi, "gdi32.dll");
@@ -520,7 +534,7 @@ export function createKoffiNative() {
   const supportsThreadDpi = typeof SetThreadDpiAwarenessContext === "function";
   const dpiV2Handle = () => koffi.as(-4, "void*");
 
-  return {
+  const native = {
     supportsThreadDpi,
     dpiV2Handle,
     setThreadDpi: (ctx) => SetThreadDpiAwarenessContext(ctx),
@@ -555,4 +569,11 @@ export function createKoffiNative() {
     keybdEvent: (vk, scan, flags) => keybd_event(vk, scan, flags, 0),
     mapVirtualKey: (vk) => MapVirtualKeyW(vk, 0)
   };
+  cachedKoffiNative = native;
+  return native;
+}
+
+/** 测试专用：重置 koffi 单例（生产代码不得调用）。 */
+export function resetKoffiNativeForTest() {
+  cachedKoffiNative = null;
 }
