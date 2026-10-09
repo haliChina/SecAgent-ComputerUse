@@ -41,7 +41,7 @@ test("createKoffiNative 同进程幂等：重复调用复用单例，不重复�
     // 第二次不传 impl：必须命中缓存——否则 Linux 上会走到真实 require + load("user32.dll") 抛错
     const n2 = createKoffiNative();
     assert.equal(n1, n2, "重复调用必须返回同一实例");
-    assert.deepEqual(structNames, ["BITMAPINFOHEADER"], "koffi 类型只允许注册一次");
+    assert.deepEqual(structNames, ["BITMAPINFOHEADER", "SA_POINT"], "koffi 类型各只允许注册一次");
     // doctor 的 loadNative 与 driver 的 #ensureNative 两条路径共享同一实例
     assert.equal(createKoffiNative(), n1);
   } finally {
