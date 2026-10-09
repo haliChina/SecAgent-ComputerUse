@@ -70,10 +70,10 @@ test("writeClipboard：文本按码点转成 PowerShell 字符数组，避免转
   assert.doesNotMatch(script, /a'b"中/); // 原文不得直接进入脚本
 });
 
-test("launchApp：detached 启动并 unref，命令为空报错", () => {
+test("launchApp：detached 启动并 unref，命令为空报错", async () => {
   const seen = {};
   const fakeChild = { pid: 4321, unref: () => { seen.unrefed = true; } };
-  const res = launchApp({
+  const res = await launchApp({
     command: "notepad",
     args: ["a.txt"],
     spawnImpl: (cmd, argv, opts) => {
@@ -86,4 +86,30 @@ test("launchApp：detached 启动并 unref，命令为空报错", () => {
   assert.equal(seen.opts.detached, true);
   assert.equal(seen.unrefed, true);
   assert.throws(() => launchApp({ command: "  ", spawnImpl: () => fakeChild }), /launch 需要 command/);
+});
+
+test("launchApp：spawn 失败（ENOENT）转为友好报错，不产生未捕获异常", async () => {
+  const { EventEmitter } = await import("node:events");
+  const child = new EventEmitter();
+  const pending = launchApp({ command: "no-such-app.exe", spawnImpl: () => child });
+  child.emit("error", Object.assign(new Error("spawn no-such-app.exe ENOENT"), { code: "ENOENT" }));
+  await assert.rejects(pending, (error) => {
+    assert.match(error.message, /启动失败（no-such-app\.exe）/);
+    assert.match(error.message, /找不到该程序/);
+    assert.match(error.message, /只能启动可执行文件/);
+    return true;
+  });
+});
+
+test("launchApp：spawn 成功事件后 resolve 并 unref", async () => {
+  const { EventEmitter } = await import("node:events");
+  const seen = {};
+  const child = new EventEmitter();
+  child.pid = 5678;
+  child.unref = () => { seen.unrefed = true; };
+  const pending = launchApp({ command: "notepad", spawnImpl: () => child });
+  child.emit("spawn");
+  const res = await pending;
+  assert.equal(res.pid, 5678);
+  assert.equal(seen.unrefed, true);
 });
