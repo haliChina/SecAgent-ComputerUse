@@ -25,16 +25,16 @@ test("encodePsCommand：UTF-16LE base64", () => {
   assert.equal(Buffer.from(encoded, "base64").toString("utf16le"), "中文abc");
 });
 
-test("listWindows：解析 JSON 并归一化字段，丢弃无标题项", async () => {
+test("listWindows：解析 JSON 并归一化字段（含进程名），丢弃无标题项", async () => {
   const runner = runnerReturning([
-    { handle: "100", pid: "42", title: " 记事本  " },
-    { handle: "0", pid: "1", title: "" },
+    { handle: "100", pid: "42", name: "Notepad", title: " 记事本  " },
+    { handle: "0", pid: "1", name: "X", title: "" },
     { handle: "200", pid: 7, title: "Chrome" }
   ]);
   const windows = await listWindows({ runner });
   assert.equal(windows.length, 2);
-  assert.deepEqual(windows[0], { handle: "100", pid: 42, title: "记事本" });
-  assert.deepEqual(windows[1], { handle: "200", pid: 7, title: "Chrome" });
+  assert.deepEqual(windows[0], { handle: "100", pid: 42, name: "Notepad", title: "记事本" });
+  assert.deepEqual(windows[1], { handle: "200", pid: 7, name: "", title: "Chrome" });
 });
 
 test("focusWindow：大小写不敏感匹配并调用 SetForegroundWindow", async () => {
@@ -46,9 +46,24 @@ test("focusWindow：大小写不敏感匹配并调用 SetForegroundWindow", asyn
   assert.match(runner.calls.at(-1), /555/);
 });
 
-test("focusWindow：无匹配时列出候选窗口并报错", async () => {
-  const runner = runnerReturning([{ handle: "1", pid: 1, title: "记事本" }]);
-  await assert.rejects(() => focusWindow({ title: "chrome", runner }), /没有标题匹配.*记事本/s);
+test("focusWindow：标题是动态歌名时按进程名匹配（QQ音乐实机场景）", async () => {
+  // 窗口标题是当前歌曲，不含「QQ音乐」——0.5.4 前会匹配失败导致前台一直是宿主自身
+  const runner = runnerReturning([
+    { handle: "900", pid: 88, name: "QQMusic", title: "Tike Tike Kardi - Arash" },
+    { handle: "901", pid: 89, name: "SecAgent", title: "SecAgent" }
+  ]);
+  const res = await focusWindow({ title: "QQMusic", runner });
+  assert.equal(res.title, "Tike Tike Kardi - Arash");
+  assert.equal(res.pid, 88);
+  assert.match(runner.calls.at(-1), /900/);
+});
+
+test("focusWindow：无匹配时列出候选窗口（标题 (进程名)）并报错", async () => {
+  const runner = runnerReturning([{ handle: "1", pid: 1, name: "Notepad", title: "记事本" }]);
+  await assert.rejects(
+    () => focusWindow({ title: "chrome", runner }),
+    /没有标题或进程名匹配.*记事本 \(Notepad\)/s
+  );
 });
 
 test("focusWindow：标题正则非法时给出明确错误", async () => {

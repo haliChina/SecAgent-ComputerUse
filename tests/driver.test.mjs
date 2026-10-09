@@ -230,6 +230,41 @@ test("inspect annotate=true 返回带编号框的标注图", async () => {
   assert.deepEqual([...decoded.rgba.subarray(i, i + 3)], [57, 255, 20]);
 });
 
+test("inspect annotate=true 同时返回元素清单文本（0.5.4：实机模型读不清框内编号）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const driver = new WindowsDriver({ native, uiaRunner: uiaRunner(uiaEls) });
+  const [, note] = await driver.inspect({ annotate: true });
+  assert.equal(note.type, "text");
+  assert.match(note.text, /#0 \[Button\] "确定"/);
+  assert.match(note.text, /元素清单/);
+});
+
+test("inspect 前台是宿主自身时给出醒目警告（0.5.4：模型点宿主活动流 20+ 次的教训）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const runner = async () => ({
+    stdout: JSON.stringify({ fgPid: process.pid, elements: uiaEls }),
+    stderr: ""
+  });
+  const driver = new WindowsDriver({ native, uiaRunner: runner });
+  const out = await driver.inspect();
+  assert.match(out, /前台窗口是 SecAgent 宿主自身/);
+  assert.match(out, /focus/);
+  // annotate 分支同样要带警告
+  const [, note] = await driver.inspect({ annotate: true });
+  assert.match(note.text, /前台窗口是 SecAgent 宿主自身/);
+});
+
+test("inspect 前台是其他进程时不误报告警", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const runner = async () => ({
+    stdout: JSON.stringify({ fgPid: 999999, elements: uiaEls }),
+    stderr: ""
+  });
+  const driver = new WindowsDriver({ native, uiaRunner: runner });
+  const out = await driver.inspect();
+  assert.doesNotMatch(out, /宿主自身/);
+});
+
 test("inspect 输出的 bbox 是截图内相对坐标（多屏负原点会被换算）", async () => {
   const native = makeFakeNative({ w: 200, h: 150, origin: { x: -100, y: -100 } });
   const driver = new WindowsDriver({
