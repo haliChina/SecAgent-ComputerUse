@@ -1,6 +1,6 @@
 {
   "name": "secagent-computer-use-plugin",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "type": "module",
   "description": "SecAgent plugin: Windows GUI control with settings console, one-click OmniParser, element map, click-by-id, screenshot, type, key, scroll, drag",
@@ -11,5 +11,8 @@
   },
   "dependencies": {
     "koffi": "^2.12.0"
+  },
+  "allowScripts": {
+    "koffi@2.16.3": true
   }
 }

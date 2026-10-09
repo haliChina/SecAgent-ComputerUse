@@ -347,3 +347,35 @@ test("inspect backend=omniparser 直接使用视觉后端", async () => {
   assert.match(out, /OmniParser/);
   assert.match(out, /"x"/);
 });
+
+test("drag 长距离分步插值：产生 mouse-move 事件流且终点精确", async () => {
+  const native = makeFakeNative();
+  const driver = new WindowsDriver({ native });
+  await driver.drag(0, 0, 400, 300); // 物理距离 500px -> 7 步
+  const moves = native.calls.filter((c) => c[0] === "setCursorPos").map((c) => [c[1], c[2]]);
+  // 起点 + 7 个插值步（最后一步即终点）
+  assert.ok(moves.length >= 6, `应有多次 setCursorPos，实际 ${moves.length}`);
+  assert.deepEqual(moves[0], [0, 0], "先落起点");
+  assert.deepEqual(moves.at(-1), [400, 300], "最后一步精确落在终点");
+  // 单调递增：轨迹不能来回跳
+  for (let i = 1; i < moves.length; i += 1) {
+    assert.ok(moves[i][0] >= moves[i - 1][0] && moves[i][1] >= moves[i - 1][1], "轨迹应单调");
+  }
+  // down 在第一步移动前，up 在最后一步移动后
+  const kinds = native.calls
+    .filter((c) => c[0] === "setCursorPos" || c[0] === "mouseEvent")
+    .map((c) => c[0]);
+  assert.equal(kinds[0], "setCursorPos");
+  assert.equal(kinds[1], "mouseEvent");
+  assert.equal(kinds.at(-1), "mouseEvent");
+});
+
+test("inspect UIA 失败且无元素时，输出带失败原因与出路（不静默）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const failing = async () => { throw new Error("powershell 不可用"); };
+  const driver = new WindowsDriver({ native, uiaRunner: failing });
+  const out = await driver.inspect();
+  assert.match(out, /UIA 侦察失败：.*powershell 不可用/);
+  assert.match(out, /doctor/);
+  assert.match(out, /omniparser/);
+});
