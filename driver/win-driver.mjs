@@ -243,14 +243,17 @@ export class WindowsDriver {
 
     let map = null;
     let uiaError = null;
+    let uiaFgPid = 0;
     if (useBackend === "uia" || useBackend === "auto") {
       let uiaRaw = [];
       try {
-        uiaRaw = await inspectViaUia({
+        const uia = await inspectViaUia({
           runner: this.uiaRunner,
           timeout: cfg.uiaTimeoutMs,
           scope: useScope
         });
+        uiaRaw = uia.elements;
+        uiaFgPid = uia.foregroundPid;
       } catch (error) {
         // 静默降级保持 auto 流程，但记下原因：最终空结果时要让模型知道
         // 「没检测到元素」是因为 UIA 挂了，而不是界面真没有可交互元素。
@@ -298,6 +301,16 @@ export class WindowsDriver {
           `目标可能是自绘 UI/游戏，或权限不足（管理员窗口需提权）。` +
           `可运行 doctor 自检，或在设置控制台启用 OmniParser 后用 backend="omniparser" 重试。`
         : "";
+    // 前台是宿主自身（0.5.4 实机踩坑：模型 focus 不到动态标题窗口，
+    // 对着 SecAgent 自己的活动流点了 20+ 次）。此时仍返回元素（兼容
+    // 自测场景），但醒目提示先 focus 目标窗口。
+    const hostPids = new Set([process.pid, process.ppid].filter(Boolean));
+    const selfWarning =
+      uiaFgPid && hostPids.has(uiaFgPid)
+        ? "\n⚠ 前台窗口是 SecAgent 宿主自身——你几乎一定是想操作别的应用。" +
+          "请先用 focus 切换目标窗口（支持进程名正则，如 title:\"QQMusic\"，" +
+          "适用于标题是动态内容的播放器等），成功后再重新 inspect；请勿点击本应用自身界面。"
+        : "";
 
     if (annotate) {
       const marked = drawSom(image, displayMap.elements, { x: 0, y: 0 }, {
@@ -308,13 +321,16 @@ export class WindowsDriver {
         {
           type: "text",
           text:
+            selfWarning +
+            "\n" +
             this.#geometryText(image, capture) +
-            "\n框内数字即元素编号，点击时用 click(elementId)。" +
+            "\n框内数字即元素编号，点击时用 click(elementId)。元素清单：\n" +
+            describeElements(displayMap, geometry) +
             warning
         }
       ];
     }
-    const text = describeElements(displayMap, geometry);
+    const text = selfWarning + describeElements(displayMap, geometry);
     return warning ? text + warning : text;
   }
 
