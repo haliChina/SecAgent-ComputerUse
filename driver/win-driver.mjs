@@ -40,7 +40,9 @@ const WHEEL_DELTA = 120;
 
 const EXTENDED_VKS = new Set([
   0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
-  0x2d, 0x2e, 0x90, 0x2c, 0xa3, 0xa5, 0x6f
+  0x2d, 0x2e, 0x90, 0x2c, 0xa3, 0xa5, 0x6f,
+  // 左/右 Win 键与 Apps 键按 Win32 规范也是扩展键，win+d / win+e 不带标志会不生效
+  0x5b, 0x5c, 0x5d
 ]);
 
 const BUTTONS = {
@@ -239,6 +241,7 @@ export class WindowsDriver {
     const image = this.#prepareImage(capture);
 
     let map = null;
+    let uiaError = null;
     if (useBackend === "uia" || useBackend === "auto") {
       let uiaRaw = [];
       try {
@@ -247,7 +250,10 @@ export class WindowsDriver {
           timeout: cfg.uiaTimeoutMs,
           scope: useScope
         });
-      } catch {
+      } catch (error) {
+        // 静默降级保持 auto 流程，但记下原因：最终空结果时要让模型知道
+        // 「没检测到元素」是因为 UIA 挂了，而不是界面真没有可交互元素。
+        uiaError = error;
         uiaRaw = [];
       }
       map = buildElementMap(uiaRaw, "uia", { cap: cfg.maxElements });
@@ -284,6 +290,13 @@ export class WindowsDriver {
       displayWidth: image.width,
       displayHeight: image.height
     };
+    // UIA 挂了且最终没有元素：明确告知原因与出路，别让模型猜「界面没有元素」
+    const warning =
+      uiaError && map.total === 0 && useBackend !== "omniparser"
+        ? `\n⚠ UIA 侦察失败：${uiaError?.message ?? String(uiaError)}。` +
+          `目标可能是自绘 UI/游戏，或权限不足（管理员窗口需提权）。` +
+          `可运行 doctor 自检，或在设置控制台启用 OmniParser 后用 backend="omniparser" 重试。`
+        : "";
 
     if (annotate) {
       const marked = drawSom(image, displayMap.elements, { x: 0, y: 0 }, {
@@ -291,10 +304,17 @@ export class WindowsDriver {
       });
       return [
         toImageContent(encodePNG(marked), "elements.png", marked.width, marked.height),
-        { type: "text", text: this.#geometryText(image, capture) + "\n框内数字即元素编号，点击时用 click(elementId)。" }
+        {
+          type: "text",
+          text:
+            this.#geometryText(image, capture) +
+            "\n框内数字即元素编号，点击时用 click(elementId)。" +
+            warning
+        }
       ];
     }
-    return describeElements(displayMap, geometry);
+    const text = describeElements(displayMap, geometry);
+    return warning ? text + warning : text;
   }
 
   async move(x, y) {
@@ -352,12 +372,24 @@ export class WindowsDriver {
   async drag(fromX, fromY, toX, toY, button = "left") {
     const b = BUTTONS[button];
     if (!b) throw new Error(`不支持的按键：${button}`);
-    return await this.#withThreadDpi(() => {
+    return await this.#withThreadDpi(async () => {
       const from = this.#toAbsolute(fromX, fromY);
       const to = this.#toAbsolute(toX, toY);
       this.native.setCursorPos(from.x, from.y);
       this.native.mouseEvent(b.down, 0);
-      this.native.setCursorPos(to.x, to.y);
+      // 分步移动：SetCursorPos 一步跳转不产生 mouse-move 事件流，
+      // Web 拖放（dragover/drop）与依赖轨迹的窗口会丢事件导致拖拽失败。
+      // 短距离（<80px）保持单步，与旧行为一致。
+      const dist = Math.hypot(to.x - from.x, to.y - from.y);
+      const steps = Math.max(1, Math.min(15, Math.ceil(dist / 80)));
+      for (let i = 1; i <= steps; i += 1) {
+        const t = i / steps;
+        this.native.setCursorPos(
+          Math.round(from.x + (to.x - from.x) * t),
+          Math.round(from.y + (to.y - from.y) * t)
+        );
+        if (i < steps) await new Promise((resolve) => setTimeout(resolve, 8));
+      }
       this.native.mouseEvent(b.up, 0);
       return { dragged: { from: { x: fromX, y: fromY }, to: { x: toX, y: toY } } };
     });
@@ -401,12 +433,16 @@ export class WindowsDriver {
         const ext = EXTENDED_VKS.has(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
         this.native.keybdEvent(vk, scan, ext | flags);
       };
-      for (const vk of modifiers) press(vk);
-      for (const vk of mains) press(vk);
-      for (let i = mains.length - 1; i >= 0; i--)
-        press(mains[i], KEYEVENTF_KEYUP);
-      for (let i = modifiers.length - 1; i >= 0; i--)
-        press(modifiers[i], KEYEVENTF_KEYUP);
+      // 中途异常也要释放修饰键，否则 ctrl 会一直卡在按下状态
+      try {
+        for (const vk of modifiers) press(vk);
+        for (const vk of mains) press(vk);
+        for (let i = mains.length - 1; i >= 0; i--)
+          press(mains[i], KEYEVENTF_KEYUP);
+      } finally {
+        for (let i = modifiers.length - 1; i >= 0; i--)
+          press(modifiers[i], KEYEVENTF_KEYUP);
+      }
       return { pressed: text };
     });
   }
