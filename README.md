@@ -85,7 +85,7 @@ OmniParser 一键安装要下载数百 MB 权重 + torch 等依赖，默认走�
 
 UIA 覆盖不到自绘 UI、游戏、Canvas 时使用。控制台 → “本地视觉服务” → **一键安装并启动**，插件会自动：
 
-1. 检测 Python（3.10/3.11，缺省时提示 `winget install Python.Python.3.10`）；
+1. 检测 Python（3.10~3.12，只接受有 OmniParser 依赖预编译包的版本；缺省时提示 `winget install Python.Python.3.11`）；
 2. 在用户目录建立虚拟环境（`~/.secagent/computer-use/omniparser`）；
 3. 下载 OmniParser 源码、安装依赖（torch/transformers/ultralytics 等）；
 4. 从 HuggingFace 下载模型权重（`microsoft/OmniParser-v2.0`，约数百 MB）；
@@ -178,7 +178,7 @@ npm run pack       # 生成 release/computer-use-<version>.zip
 ## 故障排查
 
 - **缺少 koffi**：发布包未含 `node_modules/koffi`，重新 `npm install` 后 `npm run pack`。
-- **一键安装失败**：确认已装 Python 3.10/3.11 且网络可访问 GitHub/HuggingFace；可重试，已完成的步骤会跳过。
+- **一键安装失败**：确认已装 Python 3.10~3.12（3.13+ 无 numpy==1.26.4 预编译包会编译失败）且网络可访问 GitHub/HuggingFace；可重试，已完成的步骤会跳过。
 - **inspect 列不出元素**：目标软件可能是自绘 UI/游戏，改用 OmniParser；管理员窗口需提权。
 - **任务栏/桌面图标点不到**：默认只看前台窗口，用 `inspect(scope="desktop")`，或先 `windows` 找到窗口再 `focus`。
 - **点击位置偏移**：确认截图与动作在同一 DPI 上下文（插件已自动处理）；若中途改过截图设置，请重新截图后再用坐标动作。

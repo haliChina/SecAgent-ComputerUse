@@ -115,9 +115,9 @@ export async function runDoctor(deps = {}) {
       push(
         "python",
         "Python（OmniParser 可选）",
-        !!py,
-        py ? `检测到 Python ${py.version}` : "未检测到 Python 3.9+",
-        py ? "" : "如需 OmniParser 视觉兜底：在设置控制台一键安装，或先运行 winget install Python.Python.3.11。",
+        !!py && !py.tooNew && !!py.prefix,
+        py ? (py.tooNew ? `检测到 Python ${py.version}（依赖只支持到 3.12）` : `检测到 Python ${py.version}`) : "未检测到 Python 3.10~3.12",
+        py ? (py.tooNew ? "OmniParser 依赖（numpy==1.26.4）只有 3.9~3.12 的预编译包：winget install Python.Python.3.11 后重试。" : "") : "如需 OmniParser 视觉兜底：在设置控制台一键安装，或先运行 winget install Python.Python.3.11。",
         true
       );
     } catch (error) {

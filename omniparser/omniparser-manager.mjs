@@ -68,11 +68,16 @@ export function createOmniParserManager(options = {}) {
     log(`[omniparser] ${next} ${msg}`);
   }
 
-  // 返回解释器启动前缀，如 ["py","-3.10"] 或 ["python3"]。
+  // 返回解释器启动前缀，如 ["py","-3.11"] 或 ["python3"]。
+  // 只接受 3.9~3.12：上游 OmniParser 钉死 numpy==1.26.4，它只发布 3.9~3.12 的
+  // 预编译包；3.13+ 上 pip 找不到 wheel 会退回源码编译，无 C 编译器的机器必败
+  // （实机：clang-cl / pgcc 都找不到 → metadata-generation-failed）。
+  // 3.13+ 的解释器记录在 tooNew 里用于报错指引，不直接采用。
   async function detectPython() {
     const candidates = isWin
-      ? [["py", "-3.11"], ["py", "-3.10"], ["python"], ["python3"]]
-      : [["python3.11"], ["python3.10"], ["python3"], ["python"]];
+      ? [["py", "-3.11"], ["py", "-3.12"], ["py", "-3.10"], ["python"], ["python3"]]
+      : [["python3.11"], ["python3.12"], ["python3.10"], ["python3"], ["python"]];
+    let tooNew = null;
     for (const prefix of candidates) {
       try {
         const r = await execImpl(prefix[0], [...prefix.slice(1), "-c",
@@ -80,11 +85,24 @@ export function createOmniParserManager(options = {}) {
         if (r.code === 0) {
           const version = (r.stdout || "").trim();
           const minor = Number(version.split(".")[1]);
-          if (!Number.isNaN(minor) && minor >= 9) return { prefix, version };
+          if (Number.isNaN(minor)) continue;
+          if (minor >= 9 && minor <= 12) return { prefix, version };
+          if (minor >= 13 && !tooNew) tooNew = version;
         }
       } catch { /* try next */ }
     }
-    return null;
+    return tooNew ? { prefix: null, version: tooNew, tooNew: true } : null;
+  }
+
+  // 已存在的 venv 可能来自旧的失败尝试（3.13+ 解释器）：版本不在 3.9~3.12
+  // 就整目录删掉重建，避免复用不兼容的解释器。
+  async function venvPythonUsable(vpy) {
+    try {
+      const r = await execImpl(vpy, ["-c", "import sys;print('%d.%d'%sys.version_info[:2])"]);
+      if (r.code !== 0) return false;
+      const minor = Number((r.stdout || "").trim().split(".")[1]);
+      return minor >= 9 && minor <= 12;
+    } catch { return false; }
   }
 
   async function run(cmd, args, opts) {
@@ -129,11 +147,21 @@ export function createOmniParserManager(options = {}) {
     try {
       const py = await detectPython();
       if (!py) {
-        throw new Error("未检测到 Python 3.10/3.11。可先运行：winget install Python.Python.3.10，然后重试。");
+        throw new Error("未检测到 Python 3.10~3.12。可先运行：winget install Python.Python.3.11，然后重试。");
+      }
+      if (py.tooNew) {
+        throw new Error(
+          `检测到 Python ${py.version}，但 OmniParser 依赖（numpy==1.26.4）只提供 3.9~3.12 的预编译包，` +
+          `在 ${py.version} 上 pip 会退回源码编译并因缺少 C 编译器失败。` +
+          `请安装 Python 3.11 后重试：winget install Python.Python.3.11`
+        );
       }
       fs.mkdirSync(baseDir, { recursive: true });
 
       setPhase("installing", "创建虚拟环境…", 8); onProgress({ phase, message, progress });
+      if (fs.existsSync(venvPython()) && !(await venvPythonUsable(venvPython()))) {
+        fs.rmSync(venvDir, { recursive: true, force: true });
+      }
       if (!fs.existsSync(venvPython())) {
         await run(py.prefix[0], [...py.prefix.slice(1), "-m", "venv", venvDir]);
       }
@@ -159,7 +187,15 @@ export function createOmniParserManager(options = {}) {
         }
         await run(vpy, ["-m", "pip", "install", "huggingface_hub", "fastapi", "uvicorn", "python-multipart", ...pipIndexArgs]);
       } catch (error) {
-        throw new Error(`依赖安装失败：${error.message}。国内网络可在设置中填写 pip 镜像源（如 https://pypi.tuna.tsinghua.edu.cn/simple）后重试。`);
+        const text = error instanceof Error ? error.message : String(error);
+        // 源码编译失败（无匹配 wheel + 无 C 编译器）≠ 网络问题，镜像解决不了
+        const buildFailure = /metadata-generation-failed|Building wheel|meson|clang-cl|pgcc|Visual C\+\+/i.test(text);
+        throw new Error(
+          `依赖安装失败：${text}。` +
+          (buildFailure
+            ? "这通常不是网络问题：pip 没找到匹配的预编译包，退回源码编译而机器上没有 C 编译器。请确认 Python 为 3.10~3.12（winget install Python.Python.3.11）后重试。"
+            : "国内网络可在设置中填写 pip 镜像源（如 https://pypi.tuna.tsinghua.edu.cn/simple）后重试。")
+        );
       }
 
       setPhase("installing", "下载模型权重（约数百 MB）…", 70); onProgress({ phase, message, progress });
