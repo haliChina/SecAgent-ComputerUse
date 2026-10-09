@@ -87,7 +87,7 @@ export async function runDoctor(deps = {}) {
 
   // 4) UIA / PowerShell 探针
   try {
-    const elements = await inspectViaUia({ runner: uiaRunner, timeout: uiaTimeoutMs });
+    const { elements } = await inspectViaUia({ runner: uiaRunner, timeout: uiaTimeoutMs });
     push(
       "uia",
       "UIA 元素侦察",

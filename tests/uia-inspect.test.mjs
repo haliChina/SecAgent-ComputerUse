@@ -11,7 +11,28 @@ test("encodePsCommand 输出 UTF-16LE base64，可解码回脚本", () => {
   assert.match(back, /UIAutomationClient/);
 });
 
-test("解析 PowerShell 返回的元素数组并清洗字段", async () => {
+test("解析新版输出 {fgPid, elements} 并清洗字段", async () => {
+  const stdout = JSON.stringify({
+    fgPid: 4242,
+    elements: [
+      {
+        name: "确定", role: "Button", automationId: "okBtn",
+        bbox: { x: 100, y: 200, w: 80, h: 30 },
+        cx: 140, cy: 215, enabled: true
+      }
+    ]
+  });
+  const { elements, foregroundPid } = await inspectViaUia({ runner: runnerReturning(stdout) });
+  assert.equal(foregroundPid, 4242);
+  assert.equal(elements.length, 1);
+  assert.deepEqual(elements[0], {
+    name: "确定", role: "Button", automationId: "okBtn",
+    bbox: { x: 100, y: 200, w: 80, h: 30 },
+    cx: 140, cy: 215, enabled: true
+  });
+});
+
+test("兼容旧版/测试桩的纯元素数组输出：foregroundPid 为 0", async () => {
   const stdout = JSON.stringify([
     {
       name: "确定", role: "Button", automationId: "okBtn",
@@ -19,18 +40,16 @@ test("解析 PowerShell 返回的元素数组并清洗字段", async () => {
       cx: 140, cy: 215, enabled: true
     }
   ]);
-  const els = await inspectViaUia({ runner: runnerReturning(stdout) });
-  assert.equal(els.length, 1);
-  assert.deepEqual(els[0], {
-    name: "确定", role: "Button", automationId: "okBtn",
-    bbox: { x: 100, y: 200, w: 80, h: 30 },
-    cx: 140, cy: 215, enabled: true
-  });
+  const { elements, foregroundPid } = await inspectViaUia({ runner: runnerReturning(stdout) });
+  assert.equal(foregroundPid, 0);
+  assert.equal(elements.length, 1);
+  assert.equal(elements[0].name, "确定");
 });
 
-test("空输出返回空数组", async () => {
-  const els = await inspectViaUia({ runner: runnerReturning("   ") });
-  assert.deepEqual(els, []);
+test("空输出返回空元素与 0 前台 pid", async () => {
+  const { elements, foregroundPid } = await inspectViaUia({ runner: runnerReturning("   ") });
+  assert.deepEqual(elements, []);
+  assert.equal(foregroundPid, 0);
 });
 
 test("单个元素对象（非数组）也能正确包裹", async () => {
@@ -38,19 +57,28 @@ test("单个元素对象（非数组）也能正确包裹", async () => {
     name: "取消", role: "Button", automationId: "",
     bbox: { x: 0, y: 0, w: 10, h: 10 }, cx: 5, cy: 5, enabled: true
   });
-  const els = await inspectViaUia({ runner: runnerReturning(stdout) });
-  assert.equal(els.length, 1);
-  assert.equal(els[0].name, "取消");
+  const { elements } = await inspectViaUia({ runner: runnerReturning(stdout) });
+  assert.equal(elements.length, 1);
+  assert.equal(elements[0].name, "取消");
 });
 
 test("过滤掉宽高为 0 的无效元素", async () => {
-  const stdout = JSON.stringify([
-    { name: "好", role: "Button", bbox: { x: 0, y: 0, w: 10, h: 10 }, cx: 5, cy: 5 },
-    { name: "坏", role: "Pane", bbox: { x: 0, y: 0, w: 0, h: 0 }, cx: 0, cy: 0 }
-  ]);
-  const els = await inspectViaUia({ runner: runnerReturning(stdout) });
-  assert.equal(els.length, 1);
-  assert.equal(els[0].name, "好");
+  const stdout = JSON.stringify({
+    fgPid: 1,
+    elements: [
+      { name: "好", role: "Button", bbox: { x: 0, y: 0, w: 10, h: 10 }, cx: 5, cy: 5 },
+      { name: "坏", role: "Pane", bbox: { x: 0, y: 0, w: 0, h: 0 }, cx: 0, cy: 0 }
+    ]
+  });
+  const { elements } = await inspectViaUia({ runner: runnerReturning(stdout) });
+  assert.equal(elements.length, 1);
+  assert.equal(elements[0].name, "好");
+});
+
+test("fgPid 非法时回退 0，不抛错", async () => {
+  const stdout = JSON.stringify({ fgPid: "abc", elements: [] });
+  const { foregroundPid } = await inspectViaUia({ runner: runnerReturning(stdout) });
+  assert.equal(foregroundPid, 0);
 });
 
 test("非法 JSON 抛出可识别错误", async () => {

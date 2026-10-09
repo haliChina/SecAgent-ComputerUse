@@ -56,7 +56,7 @@ foreach ($el in $all) {
   $i++
 }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Write-Output (ConvertTo-Json @($list) -Depth 5 -Compress)
+Write-Output (ConvertTo-Json ([ordered]@{ fgPid = $fgPid; elements = @($list) }) -Depth 6 -Compress)
 `;
 
 /** 把 PowerShell 脚本编码为 -EncodedCommand 需要的 UTF-16LE base64。 */
@@ -65,10 +65,17 @@ export function encodePsCommand(script) {
 }
 
 // foreground = 只看前台窗口（快、准，默认）；desktop = 从桌面根节点出发，
-// 可覆盖任务栏 / 桌面图标 / 后台窗口（慢、元素多，配合元素上限截断）。
+// 可覆盖任务栏 / 桌面图标 / 后台窗口（慢、元素多）。
+// foreground 时上报前台窗口进程号（fgPid）：宿主用它在 inspect 结果里
+// 识别「前台其实是 SecAgent 自己」的误操作场景（0.5.4 实机踩坑：focus
+// 按标题匹配不到动态歌名窗口，模型把宿主活动流当成目标点了个遍）。
 const ROOTS = {
-  foreground: `$root = [System.Windows.Automation.AutomationElement]::FromHandle([WinApi]::GetForegroundWindow())`,
-  desktop: `$root = [System.Windows.Automation.AutomationElement]::RootElement`
+  foreground:
+    "$root = [System.Windows.Automation.AutomationElement]::FromHandle([WinApi]::GetForegroundWindow())\n" +
+    "$fgPid = [int]$root.Current.ProcessId",
+  desktop:
+    "$root = [System.Windows.Automation.AutomationElement]::RootElement\n" +
+    "$fgPid = 0"
 };
 
 /** 生成指定侦察范围的 PowerShell 脚本（scope 非法时回退 foreground）。 */
@@ -109,7 +116,9 @@ function cleanNumeric(rec) {
  * @param {(encoded:string,timeout:number)=>Promise<{stdout:string,stderr:string}>} [opts.runner]
  * @param {number} [opts.timeout=15000]
  * @param {"foreground"|"desktop"} [opts.scope="foreground"]
- * @returns {Promise<Array<object>>} 清洗后的原始元素记录（绝对物理坐标）
+ * @returns {Promise<{elements:Array<object>, foregroundPid:number}>}
+ *   elements 为清洗后的原始元素记录（绝对物理坐标）；foregroundPid 为前台窗口
+ *   进程号（desktop 范围或旧版脚本输出时为 0）。
  */
 export async function inspectViaUia({ runner, timeout = 15000, scope = "foreground" } = {}) {
   const run = runner ?? defaultRunner;
@@ -123,13 +132,19 @@ export async function inspectViaUia({ runner, timeout = 15000, scope = "foregrou
     );
   }
   const stdout = (result?.stdout ?? "").trim();
-  if (!stdout) return [];
+  if (!stdout) return { elements: [], foregroundPid: 0 };
   let data;
   try {
     data = JSON.parse(stdout);
   } catch (error) {
     throw new Error(`UIA 输出不是合法 JSON：${error.message}`);
   }
-  const arr = Array.isArray(data) ? data : [data];
-  return arr.map(cleanNumeric).filter((r) => r.bbox.w > 0 && r.bbox.h > 0);
+  // 兼容两种形状：新版 {fgPid, elements}；旧版/测试桩为纯元素数组。
+  const isNewShape = data && !Array.isArray(data) && Array.isArray(data.elements);
+  const arr = isNewShape ? data.elements : Array.isArray(data) ? data : [data];
+  const foregroundPid = isNewShape ? (Number(data.fgPid) | 0) : 0;
+  return {
+    elements: arr.map(cleanNumeric).filter((r) => r.bbox.w > 0 && r.bbox.h > 0),
+    foregroundPid
+  };
 }

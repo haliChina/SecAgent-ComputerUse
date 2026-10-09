@@ -72,6 +72,7 @@ foreach ($p in Get-Process | Where-Object { $_.MainWindowHandle -ne 0 }) {
   [void]$list.Add([ordered]@{
     handle = $p.MainWindowHandle.ToString()
     pid    = [int]$p.Id
+    name   = $p.ProcessName
     title  = [string]$p.MainWindowTitle
   })
 }
@@ -82,25 +83,38 @@ Write-Output (ConvertTo-Json @($list) -Depth 4 -Compress)`;
     .map((item) => ({
       handle: String(item?.handle ?? ""),
       pid: Number(item?.pid) || 0,
+      name: String(item?.name ?? "").trim(),
       title: String(item?.title ?? "").replace(/\s+/g, " ").trim()
     }))
     .filter((item) => item.handle && item.title);
 }
 
 /**
- * 按标题正则聚焦窗口（不区分大小写）。无匹配时抛出并附上候选标题。
+ * 按标题或进程名正则聚焦窗口（不区分大小写）。无匹配时抛出并附上候选。
+ * 很多应用的窗口标题是动态内容（播放器显示歌名、编辑器显示文件名），
+ * 此时按进程名匹配更稳（如 QQMusic / notepad）。
  * @param {{title:string, runner?:Function, timeout?:number}} opts
  */
 export async function focusWindow({ title, runner, timeout } = {}) {
   const pattern = new RegExp(String(title ?? "").trim(), "i");
   const windows = await listWindows({ runner, timeout });
-  const matched = windows.filter((w) => pattern.test(w.title));
+  const matched = windows.filter((w) => pattern.test(w.title) || pattern.test(w.name));
   if (!matched.length) {
-    const sample = windows.slice(0, 20).map((w) => w.title).join(" | ") || "(无可见窗口)";
-    throw new Error(`没有标题匹配 /${pattern.source}/ 的窗口。当前窗口：${sample}`);
+    const sample =
+      windows
+        .slice(0, 20)
+        .map((w) => (w.name ? `${w.title} (${w.name})` : w.title))
+        .join(" | ") || "(无可见窗口)";
+    throw new Error(
+      `没有标题或进程名匹配 /${pattern.source}/ 的窗口。当前窗口（标题 (进程名)）：${sample}`
+    );
   }
-  // 完全相等的优先，其次取首个。
-  const target = matched.find((w) => w.title.toLowerCase() === String(title).trim().toLowerCase()) ?? matched[0];
+  // 完全相等的优先（标题或进程名），其次取首个。
+  const wanted = String(title).trim().toLowerCase();
+  const target =
+    matched.find(
+      (w) => w.title.toLowerCase() === wanted || (w.name && w.name.toLowerCase() === wanted)
+    ) ?? matched[0];
   const script = `${USER32}
 $h = [IntPtr]::new($(${target.handle}))
 [void][SecAgentWin32]::ShowWindow($h, 9)

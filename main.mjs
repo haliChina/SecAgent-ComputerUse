@@ -260,7 +260,8 @@ export async function activate(api) {
   api.registerTool(
     {
       name: "windows",
-      description: "列出当前所有可见顶层窗口（标题 + 进程号），用于定位目标程序。",
+      description:
+        "列出当前所有可见顶层窗口（标题 + 进程名 + 进程号），用于定位目标程序。窗口标题可能是动态内容（如播放器显示歌名），看进程名更稳。",
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       hidden: false
     },
@@ -274,12 +275,14 @@ export async function activate(api) {
     {
       name: "focus",
       description:
-        "把焦点切到标题匹配正则的窗口（不区分大小写）。比盲点任务栏可靠；匹配不到会报错并附当前窗口列表。",
+        "把焦点切到标题或进程名匹配正则的窗口（不区分大小写）。很多应用标题是动态内容（播放器显示歌名等），此时用进程名更稳，如 focus('QQMusic')。比盲点任务栏可靠；匹配不到会报错并附当前窗口列表。",
       inputSchema: {
         type: "object",
         additionalProperties: false,
         required: ["title"],
-        properties: { title: { type: "string", description: "窗口标题正则，如 notepad|记事本" } }
+        properties: {
+          title: { type: "string", description: "窗口标题或进程名的正则，如 notepad|记事本|QQMusic" }
+        }
       },
       hidden: false
     },
