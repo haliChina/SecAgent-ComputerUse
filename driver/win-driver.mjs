@@ -147,7 +147,8 @@ export class WindowsDriver {
     try {
       return await fn();
     } finally {
-      n.setThreadDpi(previous);
+      // 返回 0/NULL 表示 V2 上下文设置失败，线程 DPI 未变，无需恢复
+      if (previous) n.setThreadDpi(previous);
     }
   }
 
@@ -523,16 +524,22 @@ export function createKoffiNative(koffiImpl) {
     biClrImportant: "uint32"
   });
 
+  const PointStruct = koffi.struct("SA_POINT", { x: "int32", y: "int32" });
+
   let SetThreadDpiAwarenessContext = null;
   try {
+    // DPI_AWARENESS_CONTEXT 是指针大小的伪句柄（-4 = PER_MONITOR_AWARE_V2）。
+    // 不能声明 void* 再 koffi.as(-4, "void*")：koffi 2.16 的 as() 不接受负数，
+    // 抛 "Invalid argument"——0.5.2 实机即此症状（doctor 只读 metrics 全绿，
+    // screenshot 第一步 #withThreadDpi 就炸）。按 int64 封送可直接传 -4。
     SetThreadDpiAwarenessContext = user32.func(
-      "void* SetThreadDpiAwarenessContext(void* dpiContext)"
+      "int64 SetThreadDpiAwarenessContext(int64 dpiContext)"
     );
   } catch {
     SetThreadDpiAwarenessContext = null;
   }
   const supportsThreadDpi = typeof SetThreadDpiAwarenessContext === "function";
-  const dpiV2Handle = () => koffi.as(-4, "void*");
+  const dpiV2Handle = () => -4;
 
   const native = {
     supportsThreadDpi,
@@ -547,23 +554,36 @@ export function createKoffiNative(koffiImpl) {
     selectObject: (dc, obj) => SelectObject(dc, obj),
     bitBlt: (dc, w, h, src, ox, oy) => BitBlt(dc, 0, 0, w, h, src, ox, oy, SRCCOPY),
     deleteObject: (o) => DeleteObject(o),
-    allocBitmapInfo: (w, h) =>
-      koffi.alloc(BitmapInfoHeader, {
+    allocBitmapInfo: (w, h) => {
+      // koffi 2.16 的 alloc(type, length) 第二参是元素个数，不是初始值——
+      // 旧写法 alloc(结构体, {对象}) 抛 "Unexpected Object value for length"。
+      // 先分配再 encode 整个结构体。
+      const bi = koffi.alloc(BitmapInfoHeader, 1);
+      koffi.encode(bi, BitmapInfoHeader, {
         biSize: 40,
         biWidth: w,
         biHeight: -h,
         biPlanes: 1,
         biBitCount: 32,
         biCompression: 0,
-        biSizeImage: w * h * 4
-      }),
+        biSizeImage: w * h * 4,
+        biXPelsPerMeter: 0,
+        biYPelsPerMeter: 0,
+        biClrUsed: 0,
+        biClrImportant: 0
+      });
+      return bi;
+    },
     getDIBits: (dc, bmp, h, bits, bi) =>
       GetDIBits(dc, bmp, 0, h, bits, bi, DIB_RGB_COLORS),
     setCursorPos: (x, y) => SetCursorPos(x, y),
     cursorPos: () => {
-      const point = koffi.alloc(8); // POINT { LONG x; LONG y; }
+      // POINT { LONG x; LONG y; }——koffi 2.16：alloc(type, length) 分配，
+      // 读标量用 decode(ptr, offset, "int32")；旧写法 alloc(8) 参数数都不对，
+      // decode(p, koffi.pointer("int32"), 8) 则是按 int32* 数组解引用，语义全错。
+      const point = koffi.alloc(PointStruct, 1);
       if (!GetCursorPos(point)) throw new Error("GetCursorPos 失败");
-      return { x: koffi.decode(point, koffi.pointer("int32")), y: koffi.decode(point, koffi.pointer("int32"), 8) };
+      return { x: koffi.decode(point, 0, "int32"), y: koffi.decode(point, 4, "int32") };
     },
     mouseEvent: (flags, data) => mouse_event(flags, 0, 0, data, 0),
     keybdEvent: (vk, scan, flags) => keybd_event(vk, scan, flags, 0),
