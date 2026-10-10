@@ -169,8 +169,33 @@ export function createOmniParserManager(options = {}) {
 
       setPhase("installing", "升级 pip…", 12); onProgress({ phase, message, progress });
       const pipIndexArgs = pipIndexUrl ? ["-i", pipIndexUrl] : [];
+      // pip 专用环境与参数（实机踩坑）：
+      // - 固定 --cache-dir：断线重试时已下载的 wheel（torch 约 2GB）直接复用，不从头再来；
+      // - 独立 TMP/TEMP：系统共享 Temp 里上次失败残留/正被杀毒扫描的 pip-unpack 文件
+      //   会触发 WinError 32（另一程序正在使用此文件），换到自己的目录并每次安装前清空；
+      // - 拉长 --timeout：慢镜像 15 秒默认超时不够用。
+      const pipTmp = path.join(baseDir, "pip-tmp");
+      const pipCache = path.join(baseDir, "pip-cache");
+      fs.rmSync(pipTmp, { recursive: true, force: true });
+      fs.mkdirSync(pipTmp, { recursive: true });
+      fs.mkdirSync(pipCache, { recursive: true });
+      const pipEnv = { ...process.env, TMP: pipTmp, TEMP: pipTmp, TMPDIR: pipTmp };
+      const pipBaseArgs = ["-m", "pip", "--no-input", "--cache-dir", pipCache, "--timeout", "60", "--retries", "5"];
+      // 瞬态失败（镜像断连/杀毒瞬时锁文件）自动重试一次；缓存命中时重试代价很小。
+      const transient = /RemoteDisconnected|ConnectionReset|connection broken|ReadTimeout|timed out|WinError 32|being used by another process/i;
+      const runPip = async (installArgs) => {
+        try {
+          await run(vpy, [...pipBaseArgs, "install", ...installArgs, ...pipIndexArgs], { maxBuffer: undefined, env: pipEnv });
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error);
+          if (!transient.test(text)) throw error;
+          log(`[omniparser] 瞬态失败，1.5 秒后从缓存续传重试一次：${text.slice(0, 200)}`);
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await run(vpy, [...pipBaseArgs, "install", ...installArgs, ...pipIndexArgs], { maxBuffer: undefined, env: pipEnv });
+        }
+      };
       try {
-        await run(vpy, ["-m", "pip", "install", "--upgrade", "pip", ...pipIndexArgs]);
+        await run(vpy, [...pipBaseArgs, "install", "--upgrade", "pip", ...pipIndexArgs], { env: pipEnv });
       } catch (error) {
         throw new Error(`pip 升级失败：${error.message}。国内网络可在设置中填写 pip 镜像源后重试。`);
       }
@@ -183,19 +208,27 @@ export function createOmniParserManager(options = {}) {
       const requirements = path.join(srcDir, "requirements.txt");
       try {
         if (fs.existsSync(requirements)) {
-          await run(vpy, ["-m", "pip", "install", "-r", requirements, ...pipIndexArgs], { maxBuffer: undefined });
+          await runPip(["-r", requirements]);
         }
-        await run(vpy, ["-m", "pip", "install", "huggingface_hub", "fastapi", "uvicorn", "python-multipart", ...pipIndexArgs]);
+        await runPip(["huggingface_hub", "fastapi", "uvicorn", "python-multipart"]);
+        fs.rmSync(pipTmp, { recursive: true, force: true });
       } catch (error) {
         const text = error instanceof Error ? error.message : String(error);
-        // 源码编译失败（无匹配 wheel + 无 C 编译器）≠ 网络问题，镜像解决不了
+        // 分诊：源码编译失败 ≠ 网络问题；文件被锁 ≠ 没配镜像；已配镜像断连 ≠ 让你再配镜像
         const buildFailure = /metadata-generation-failed|Building wheel|meson|clang-cl|pgcc|Visual C\+\+/i.test(text);
-        throw new Error(
-          `依赖安装失败：${text}。` +
-          (buildFailure
-            ? "这通常不是网络问题：pip 没找到匹配的预编译包，退回源码编译而机器上没有 C 编译器。请确认 Python 为 3.10~3.12（winget install Python.Python.3.11）后重试。"
-            : "国内网络可在设置中填写 pip 镜像源（如 https://pypi.tuna.tsinghua.edu.cn/simple）后重试。")
-        );
+        const fileLocked = /WinError 32|being used by another process/i.test(text);
+        const connBroken = /RemoteDisconnected|ConnectionReset|connection broken|ReadTimeout|timed out/i.test(text);
+        let hint;
+        if (buildFailure) {
+          hint = "这通常不是网络问题：pip 没找到匹配的预编译包，退回源码编译而机器上没有 C 编译器。请确认 Python 为 3.10~3.12（winget install Python.Python.3.11）后重试。";
+        } else if (fileLocked) {
+          hint = `安装文件被其他程序占用——通常是杀毒软件正在扫描刚下载的包。请把 ${baseDir} 加入杀毒白名单（或暂时关闭实时防护）后重试；已下载的包会从缓存续传，不会重复下载。`;
+        } else if (connBroken && pipIndexUrl) {
+          hint = `与镜像 ${pipIndexUrl} 的连接中断（网络不稳或镜像限流）。可直接重试——已下载的包从缓存续传；仍失败就换一个镜像源（如 https://pypi.tuna.tsinghua.edu.cn/simple）。`;
+        } else {
+          hint = "国内网络可在设置中填写 pip 镜像源（如 https://pypi.tuna.tsinghua.edu.cn/simple）后重试。";
+        }
+        throw new Error(`依赖安装失败：${text}。${hint}`);
       }
 
       setPhase("installing", "下载模型权重（约数百 MB）…", 70); onProgress({ phase, message, progress });

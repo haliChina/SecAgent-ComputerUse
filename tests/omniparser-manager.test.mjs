@@ -305,3 +305,87 @@ test("依赖编译失败（无 C 编译器）：提示 Python 版本问题而不
   await assert.rejects(() => manager.install(), /不是网络问题|预编译|3\.10~3\.12/);
   assert.equal(manager.status().phase, "error");
 });
+
+// ---- 实机反馈：镜像断连 RemoteDisconnected + pip 临时文件被杀毒锁 WinError 32 ----
+
+function makePipHarness({ baseDir, pipIndexUrl = "", failTwiceWith = null, failOnceWith = null } = {}) {
+  fs.mkdirSync(path.join(baseDir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(baseDir, "src", "requirements.txt"), "numpy==1.26.4\ntorch\nopencv-python-headless\n");
+  const execCalls = [];
+  let pipInstallAttempts = 0;
+  const execImpl = (cmd, args, opts) => {
+    execCalls.push({ cmd, args, opts });
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    if (list.some((x) => String(x) === "install")) {
+      const isRequirements = list.some((x) => String(x) === "-r");
+      if (isRequirements) pipInstallAttempts += 1;
+      const shouldFailOnce = isRequirements && failOnceWith && pipInstallAttempts === 1;
+      const shouldFailTwice = isRequirements && failTwiceWith;
+      if (shouldFailOnce || shouldFailTwice) {
+        return Promise.resolve({ code: 1, stdout: "", stderr: failOnceWith || failTwiceWith });
+      }
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl,
+    getPipIndexUrl: () => pipIndexUrl,
+    spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
+    fetchImpl: async () => ({ ok: false }),
+    serverTemplate: "PYCODE",
+    log() {}
+  });
+  return { manager, execCalls };
+}
+
+test("镜像断连：自动重试一次并从缓存续传成功，pip 使用独立缓存/临时目录", async () => {
+  const baseDir = tmpDir();
+  const { manager, execCalls } = makePipHarness({
+    baseDir,
+    failOnceWith: "WARNING: Retrying ... connection broken by 'RemoteDisconnected('Remote end closed connection without response')' ... opencv_python_headless-5.0.0.93-cp37-abi3-win_amd64.whl"
+  });
+  await manager.install();
+  assert.equal(manager.status().phase, "installed");
+  // -r 安装恰好两次（首败 + 重试）
+  const reqCalls = execCalls.filter((c) => c.args && c.args.includes("-r"));
+  assert.equal(reqCalls.length, 2);
+  // 固定缓存目录 + 独立临时目录
+  const pipCall = reqCalls[0];
+  assert.ok(pipCall.args.includes("--cache-dir"));
+  assert.equal(pipCall.args[pipCall.args.indexOf("--cache-dir") + 1], path.join(baseDir, "pip-cache"));
+  assert.equal(pipCall.opts.env.TMP, path.join(baseDir, "pip-tmp"));
+  assert.equal(pipCall.opts.env.TEMP, path.join(baseDir, "pip-tmp"));
+});
+
+test("文件被杀毒锁定（WinError 32）重试仍失败：报白名单指引，不再误推镜像源", async () => {
+  const baseDir = tmpDir();
+  const { manager } = makePipHarness({
+    baseDir,
+    failTwiceWith: "ERROR: Could not install packages due to an OSError: [WinError 32] 另一个程序正在使用此文件，进程无法访问。: 'C:\\\\Temp\\\\pip-unpack-x\\\\opencv.whl' Check the permissions."
+  });
+  await assert.rejects(() => manager.install(), (error) => {
+    assert.match(error.message, /杀毒|白名单/);
+    assert.doesNotMatch(error.message, /可在设置中填写 pip 镜像源/);
+    return true;
+  });
+  assert.equal(manager.status().phase, "error");
+});
+
+test("已配置镜像仍断连：提示换源与续传，而不是让用户再配镜像", async () => {
+  const baseDir = tmpDir();
+  const { manager } = makePipHarness({
+    baseDir,
+    pipIndexUrl: "https://mirrors.aliyun.com/pypi/web/simple",
+    failTwiceWith: "WARNING: Retrying ... connection broken by 'RemoteDisconnected('Remote end closed connection without response')'"
+  });
+  await assert.rejects(() => manager.install(), (error) => {
+    assert.match(error.message, /mirrors\.aliyun\.com/);
+    assert.match(error.message, /换一个镜像源/);
+    assert.match(error.message, /缓存续传/);
+    assert.doesNotMatch(error.message, /可在设置中填写 pip 镜像源/);
+    return true;
+  });
+});

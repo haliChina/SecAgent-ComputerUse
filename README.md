@@ -179,6 +179,8 @@ npm run pack       # 生成 release/computer-use-<version>.zip
 
 - **缺少 koffi**：发布包未含 `node_modules/koffi`，重新 `npm install` 后 `npm run pack`。
 - **一键安装失败**：确认已装 Python 3.10~3.12（3.13+ 无 numpy==1.26.4 预编译包会编译失败）且网络可访问 GitHub/HuggingFace；可重试，已完成的步骤会跳过。
+- **依赖下载中断（RemoteDisconnected）**：直接重试——已下载的包从本地缓存续传，不会重复下载；频繁断连就换一个 pip 镜像源。
+- **WinError 32（文件被占用）**：杀毒软件正在扫描刚下载的包，把 ~/.secagent/computer-use 加入杀毒白名单或暂时关闭实时防护后重试。
 - **inspect 列不出元素**：目标软件可能是自绘 UI/游戏，改用 OmniParser；管理员窗口需提权。
 - **任务栏/桌面图标点不到**：默认只看前台窗口，用 `inspect(scope="desktop")`，或先 `windows` 找到窗口再 `focus`。
 - **点击位置偏移**：确认截图与动作在同一 DPI 上下文（插件已自动处理）；若中途改过截图设置，请重新截图后再用坐标动作。
