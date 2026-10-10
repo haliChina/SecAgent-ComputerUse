@@ -54,16 +54,16 @@
    - “把浏览器里这个表单填一下”
    - “打开设置，把元素上限调到 40”
 
-## 国内用户：镜像加速（v0.4+）
+## 国内用户：镜像加速（v0.5.7+）
 
-OmniParser 一键安装要下载数百 MB 权重 + torch 等依赖，默认走官方源在国内容易卡死。**先在设置控制台填好下面两项再点一键安装**：
+OmniParser 一键安装要下载约 1.1 GB 权重 + torch 等依赖。**权重默认从魔搭（modelscope.cn，阿里云托管）直连下载，国内一般无需任何配置**；pip 依赖建议配置镜像源：
 
-| 设置项 | 填写示例 |
-|---|---|
-| HuggingFace 镜像 | `https://hf-mirror.com` |
-| pip 镜像源 | `https://pypi.tuna.tsinghua.edu.cn/simple` |
+| 设置项 | 填写示例 | 说明 |
+|---|---|---|
+| pip 镜像源 | `https://pypi.tuna.tsinghua.edu.cn/simple` | 强烈建议填写 |
+| HuggingFace 镜像 | `https://hf-mirror.com` | 可选。权重下载的**兜底源**（魔搭失败后再试）；部分网络 hf-mirror.com 不可达，留空即可 |
 
-留空则使用官方源。权重下载走 `HF_ENDPOINT` 环境变量，pip 安装自动加 `-i` 参数。
+权重逐文件下载、支持断点续传（中断后重试不重复下载）；失败自动按「魔搭 → 设置的镜像 → HuggingFace 官方」换源重试。pip 安装自动加 `-i` 参数。
 
 ## 设置控制台
 
@@ -88,7 +88,7 @@ UIA 覆盖不到自绘 UI、游戏、Canvas 时使用。控制台 → “本地�
 1. 检测 Python（3.10~3.12，只接受有 OmniParser 依赖预编译包的版本；缺省时提示 `winget install Python.Python.3.11`）；
 2. 在用户目录建立虚拟环境（`~/.secagent/computer-use/omniparser`）；
 3. 下载 OmniParser 源码、安装依赖（torch/transformers/ultralytics 等）；
-4. 从 HuggingFace 下载模型权重（`microsoft/OmniParser-v2.0`，约数百 MB）；
+4. 下载模型权重（`microsoft/OmniParser-v2.0` + Florence-2 tokenizer，约 1.1 GB；默认魔搭直连，失败依次尝试镜像/官方源，断点续传）；
 5. 写入并后台拉起 `/parse` 服务，健康检查通过后开关生效。
 
 安装耗时取决于网络，控制台会显示阶段与进度；可勾选“开机自启”。卸载会删除虚拟环境与权重。
@@ -181,6 +181,7 @@ npm run pack       # 生成 release/computer-use-<version>.zip
 - **一键安装失败**：确认已装 Python 3.10~3.12（3.13+ 无 numpy==1.26.4 预编译包会编译失败）且网络可访问 GitHub/HuggingFace；可重试，已完成的步骤会跳过。
 - **依赖下载中断（RemoteDisconnected）**：直接重试——已下载的包从本地缓存续传，不会重复下载；频繁断连就换一个 pip 镜像源。
 - **WinError 32（文件被占用）**：杀毒软件正在扫描刚下载的包，把 ~/.secagent/computer-use 加入杀毒白名单或暂时关闭实时防护后重试。
+- **权重下载失败/hf-mirror.com 不可达**：权重默认走魔搭（modelscope.cn）直连，无需镜像；可直接重试，已完成的文件自动跳过、断点文件自动续传。
 - **inspect 列不出元素**：目标软件可能是自绘 UI/游戏，改用 OmniParser；管理员窗口需提权。
 - **任务栏/桌面图标点不到**：默认只看前台窗口，用 `inspect(scope="desktop")`，或先 `windows` 找到窗口再 `focus`。
 - **点击位置偏移**：确认截图与动作在同一 DPI 上下文（插件已自动处理）；若中途改过截图设置，请重新截图后再用坐标动作。

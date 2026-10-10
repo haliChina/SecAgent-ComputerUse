@@ -4,12 +4,44 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { Readable } from "node:stream";
 import { createOmniParserManager } from "../omniparser/omniparser-manager.mjs";
 
 function tmpDir() {
   const dir = path.join(os.tmpdir(), "cu-mgr-" + crypto.randomUUID());
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// 权重下载的 fetch 桩：魔搭 URL 返回 16 字节内容；200 给 content-length，206 给 content-range
+function weightResponse({ status = 200, total = 16, chunk = null } = {}) {
+  const body = chunk ?? Buffer.alloc(total, 0x61);
+  return {
+    ok: status === 200 || status === 206,
+    status,
+    headers: {
+      get: (k) => {
+        const key = String(k).toLowerCase();
+        if (key === "content-length" && status !== 206) return String(body.length);
+        if (key === "content-range" && status === 206) return `bytes 0-${body.length - 1}/${total}`;
+        return null;
+      }
+    },
+    body: Readable.from([body])
+  };
+}
+
+// 默认 fetch 桩：魔搭可用（权重直连成功），其它源 404；health 由参数控制
+function modelScopeFetch(healthOk = true) {
+  return async (url) => {
+    if (String(url).endsWith("/health")) return healthOk ? { ok: true } : { ok: false };
+    if (String(url).includes("modelscope.cn")) return weightResponse();
+    return { ok: false, status: 404 };
+  };
+}
+
+function dummySpawn() {
+  return { pid: 1, on() {}, stdout: null, stderr: null, kill() {} };
 }
 
 function makeHarness({ baseDir, pythonOk = true, healthOk = true } = {}) {
@@ -31,12 +63,7 @@ function makeHarness({ baseDir, pythonOk = true, healthOk = true } = {}) {
     spawnCalls.push({ cmd, args, opts });
     return { pid: 4321, on() {}, stdout: null, stderr: null, kill() {} };
   };
-  const fetchImpl = async (url) => {
-    if (String(url).endsWith("/health")) {
-      return healthOk ? { ok: true } : { ok: false };
-    }
-    return { ok: false };
-  };
+  const fetchImpl = modelScopeFetch(healthOk);
 
   const manager = createOmniParserManager({
     baseDir,
@@ -65,9 +92,12 @@ test("一键安装：检测 Python→venv→源码→依赖→权重→写入脚
   for (const pkg of ["huggingface_hub", "fastapi", "uvicorn", "python-multipart"]) {
     assert.ok(pipText.includes(pkg), "缺少依赖 " + pkg);
   }
-  // 权重：snapshot_download
-  assert.ok(execCalls.some((c) =>
-    c.args && c.args.some((a) => String(a).includes("snapshot_download"))));
+  // 权重：13 个文件全部从魔搭直连下载就位（含 Florence tokenizer 合并文件）
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_detect", "model.pt")));
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_caption_florence", "model.safetensors")));
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_caption_florence", "tokenizer.json")));
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_caption_florence", "processing_florence2.py")));
+  assert.equal(st.hasWeights, true, "hasWeights 应为真（全部文件就位）");
 });
 
 test("缺少 Python 时安装失败并给出 winget 提示", async () => {
@@ -115,8 +145,9 @@ test("未安装直接 start 报错", async () => {
   await assert.rejects(() => manager.start(), /尚未安装/);
 });
 
-function makeMirrorHarness({ baseDir, hfMirror = "", pipIndexUrl = "" } = {}) {
+function makeMirrorHarness({ baseDir, hfMirror = "", pipIndexUrl = "", modelScopeOk = true } = {}) {
   const execCalls = [];
+  const fetchedUrls = [];
   const execImpl = (cmd, args, opts) => {
     execCalls.push({ cmd, args, opts });
     const list = args || [];
@@ -125,25 +156,34 @@ function makeMirrorHarness({ baseDir, hfMirror = "", pipIndexUrl = "" } = {}) {
     }
     return Promise.resolve({ code: 0, stdout: "", stderr: "" });
   };
+  const fetchImpl = async (url) => {
+    fetchedUrls.push(String(url));
+    if (String(url).includes("modelscope.cn")) {
+      return modelScopeOk ? weightResponse() : { ok: false, status: 404 };
+    }
+    if (hfMirror && String(url).startsWith(hfMirror)) return weightResponse();
+    return { ok: false, status: 404 };
+  };
   const manager = createOmniParserManager({
     baseDir,
     execImpl,
     spawnImpl: (cmd, args, opts) => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {}, _opts: opts }),
-    fetchImpl: async () => ({ ok: false }),
+    fetchImpl,
     serverTemplate: "PYCODE",
     getHfMirror: () => hfMirror,
     getPipIndexUrl: () => pipIndexUrl,
     log() {}
   });
-  return { manager, execCalls };
+  return { manager, execCalls, fetchedUrls };
 }
 
-test("配置镜像后：pip 走 -i，权重下载走 HF_ENDPOINT", async () => {
+test("配置镜像后：pip 走 -i；魔搭缺文件时权重回退到镜像源", async () => {
   const baseDir = tmpDir();
-  const { manager, execCalls } = makeMirrorHarness({
+  const { manager, execCalls, fetchedUrls } = makeMirrorHarness({
     baseDir,
     hfMirror: "https://hf-mirror.com",
-    pipIndexUrl: "https://pypi.tuna.tsinghua.edu.cn/simple"
+    pipIndexUrl: "https://pypi.tuna.tsinghua.edu.cn/simple",
+    modelScopeOk: false // 魔搭 404 → 逐文件跳到镜像源
   });
   await manager.install();
 
@@ -153,46 +193,108 @@ test("配置镜像后：pip 走 -i，权重下载走 HF_ENDPOINT", async () => {
     const i = c.args.indexOf("-i");
     assert.ok(i !== -1 && c.args[i + 1] === "https://pypi.tuna.tsinghua.edu.cn/simple");
   }
-  const weightCall = execCalls.find((c) =>
-    c.args && c.args.some((a) => String(a).includes("snapshot_download")));
-  assert.ok(weightCall, "应有权重下载调用");
-  assert.equal(weightCall.opts.env.HF_ENDPOINT, "https://hf-mirror.com");
-  assert.ok(weightCall.opts.env.OMNI_W_TARGET.endsWith("weights"));
+  const weightUrls = fetchedUrls.filter((u) => u.includes("/resolve/"));
+  assert.ok(weightUrls.some((u) => u.startsWith("https://hf-mirror.com/")), "魔搭缺文件时应经镜像下载");
+  assert.ok(weightUrls.every((u) => !u.startsWith("https://huggingface.co/")), "镜像可用时不应再走官方源");
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_detect", "model.pt")), "权重应就位");
+  assert.equal(manager.status().phase, "installed");
 });
 
-test("不配镜像：不传 HF_ENDPOINT / -i", async () => {
+test("不配镜像：权重默认走魔搭，pip 不带 -i", async () => {
   const baseDir = tmpDir();
-  const { manager, execCalls } = makeMirrorHarness({ baseDir });
+  const { manager, execCalls, fetchedUrls } = makeMirrorHarness({ baseDir });
   await manager.install();
-  const weightCall = execCalls.find((c) =>
-    c.args && c.args.some((a) => String(a).includes("snapshot_download")));
-  assert.ok(weightCall);
-  assert.equal(weightCall.opts.env.HF_ENDPOINT, undefined);
+  const weightUrls = fetchedUrls.filter((u) => u.includes("/resolve/"));
+  assert.ok(weightUrls.length >= 13, "应逐文件下载权重（13 个）");
+  assert.ok(weightUrls.every((u) => u.startsWith("https://modelscope.cn/")), "默认应从魔搭直连");
   const pipCalls = execCalls.filter((c) => c.args && c.args[0] === "-m" && c.args[1] === "pip");
   assert.ok(pipCalls.every((c) => !c.args.includes("-i")));
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_caption_florence", "model.safetensors")));
 });
 
-test("权重下载失败且无镜像：提示填写 HuggingFace 镜像", async () => {
+test("权重全源失败：报错列出各源原因并提示重试续传，不再推荐 hf-mirror", async () => {
   const baseDir = tmpDir();
   const execImpl = (cmd, args) => {
     const list = args || [];
     if (list.some((x) => String(x).includes("import sys"))) {
       return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
     }
-    if (list.some((x) => String(x).includes("snapshot_download"))) {
-      return Promise.resolve({ code: 1, stdout: "", stderr: "network unreachable" });
-    }
     return Promise.resolve({ code: 0, stdout: "", stderr: "" });
   };
   const manager = createOmniParserManager({
     baseDir, execImpl,
-    spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
-    fetchImpl: async () => ({ ok: false }),
+    spawnImpl: dummySpawn,
+    fetchImpl: async () => ({ ok: false, status: 502 }),
     serverTemplate: "PYCODE",
     log() {}
   });
-  await assert.rejects(() => manager.install(), /HuggingFace 镜像/);
+  await assert.rejects(() => manager.install(), (error) => {
+    assert.match(error.message, /modelscope\.cn|魔搭/);
+    assert.match(error.message, /不会重复下载/);
+    assert.doesNotMatch(error.message, /hf-mirror\.com/, "不应再推荐不可达的 hf-mirror");
+    return true;
+  });
   assert.equal(manager.status().phase, "error");
+});
+
+test("断点续传：.part 已存在时带 Range 请求，206 追加后按总长校验就位", async () => {
+  const baseDir = tmpDir();
+  // 预置只下了一半的 .part（8/16 字节）
+  const partPath = path.join(baseDir, "weights", "icon_caption_florence", "model.safetensors.part");
+  fs.mkdirSync(path.dirname(partPath), { recursive: true });
+  fs.writeFileSync(partPath, Buffer.alloc(8, 0x62));
+  const execImpl = (cmd, args) => {
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const fetchImpl = async (url, opts) => {
+    if (String(url).includes("modelscope.cn")) {
+      if (String(url).endsWith("model.safetensors")) {
+        assert.equal(opts.headers.Range, "bytes=8-", "续传应带 Range 头");
+        return weightResponse({ status: 206, total: 16, chunk: Buffer.alloc(8, 0x63) });
+      }
+      return weightResponse();
+    }
+    return { ok: false, status: 404 };
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl, spawnImpl: dummySpawn, fetchImpl, serverTemplate: "PYCODE", log() {}
+  });
+  await manager.install();
+  const final = path.join(baseDir, "weights", "icon_caption_florence", "model.safetensors");
+  const content = fs.readFileSync(final);
+  assert.equal(content.length, 16);
+  assert.ok(content.subarray(0, 8).every((b) => b === 0x62), "前 8 字节应为原 .part 内容");
+  assert.ok(content.subarray(8).every((b) => b === 0x63), "后 8 字节应为续传内容");
+  assert.equal(fs.existsSync(`${final}.part`), false, "完成后 .part 应消失");
+});
+
+test("权重源瞬态失败（502）：同源自动重试一次后成功，不换源", async () => {
+  const baseDir = tmpDir();
+  let failNext = true;
+  const execImpl = (cmd, args) => {
+    const list = args || [];
+    if (list.some((x) => String(x).includes("import sys"))) {
+      return Promise.resolve({ code: 0, stdout: "3.11\n", stderr: "" });
+    }
+    return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  };
+  const fetchImpl = async (url) => {
+    if (String(url).includes("modelscope.cn")) {
+      if (failNext) { failNext = false; return { ok: false, status: 502 }; }
+      return weightResponse();
+    }
+    return { ok: false, status: 404 };
+  };
+  const manager = createOmniParserManager({
+    baseDir, execImpl, spawnImpl: dummySpawn, fetchImpl, serverTemplate: "PYCODE", log() {}
+  });
+  await manager.install();
+  assert.equal(manager.status().phase, "installed");
+  assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_detect", "model.pt")));
 });
 
 // ---- 实机反馈：Python 3.13+ 一键安装 numpy 源码编译失败（无 C 编译器）----
@@ -214,7 +316,7 @@ function makeVersionHarness(baseDir, probe) {
   const manager = createOmniParserManager({
     baseDir, execImpl,
     spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
-    fetchImpl: async () => ({ ok: false }),
+    fetchImpl: modelScopeFetch(),
     serverTemplate: "PYCODE",
     log() {}
   });
@@ -268,7 +370,7 @@ test("残留的 3.13 venv：自动删除并按检测到的 3.11 重建", async (
   const manager = createOmniParserManager({
     baseDir, execImpl,
     spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
-    fetchImpl: async () => ({ ok: false }),
+    fetchImpl: modelScopeFetch(),
     serverTemplate: "PYCODE",
     log() {}
   });
@@ -298,7 +400,7 @@ test("依赖编译失败（无 C 编译器）：提示 Python 版本问题而不
   const manager = createOmniParserManager({
     baseDir, execImpl,
     spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
-    fetchImpl: async () => ({ ok: false }),
+    fetchImpl: modelScopeFetch(),
     serverTemplate: "PYCODE",
     log() {}
   });
@@ -334,7 +436,7 @@ function makePipHarness({ baseDir, pipIndexUrl = "", failTwiceWith = null, failO
     baseDir, execImpl,
     getPipIndexUrl: () => pipIndexUrl,
     spawnImpl: () => ({ pid: 1, on() {}, stdout: null, stderr: null, kill() {} }),
-    fetchImpl: async () => ({ ok: false }),
+    fetchImpl: modelScopeFetch(),
     serverTemplate: "PYCODE",
     log() {}
   });

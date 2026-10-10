@@ -48,7 +48,7 @@ export const SETTING_FIELDS = [
   { key: "omniAutoStart", group: "omniparser", type: "boolean", default: false,
     label: "SecAgent 启动时自动拉起服务", hint: "已安装后生效，会在后台启动本地服务。", effect: "immediate" },
   { key: "hfMirror", group: "omniparser", type: "string", default: "",
-    label: "HuggingFace 镜像", hint: "国内下载权重卡住时填写，如 https://hf-mirror.com；留空使用官方源。", effect: "immediate" },
+    label: "HuggingFace 镜像", hint: "可选。权重默认先走魔搭（modelscope.cn，国内直连），失败再试此处镜像，最后官方源；部分网络 hf-mirror.com 不可达，留空即可。", effect: "immediate" },
   { key: "pipIndexUrl", group: "omniparser", type: "string", default: "",
     label: "pip 镜像源", hint: "国内安装依赖缓慢时填写，如 https://pypi.tuna.tsinghua.edu.cn/simple；留空使用官方源。", effect: "immediate" },
 
