@@ -92,6 +92,12 @@ test("一键安装：检测 Python→venv→源码→依赖→权重→写入脚
   for (const pkg of ["huggingface_hub", "fastapi", "uvicorn", "python-multipart"]) {
     assert.ok(pipText.includes(pkg), "缺少依赖 " + pkg);
   }
+  // transformers 钉版：4.53+ 的 tokenizers 新后端与 Florence-2 remote code 不兼容
+  // （实机：AttributeError: TokenizersBackend has no attribute additional_special_tokens）
+  assert.ok(pipText.includes("transformers==4.49.0"), "必须钉 transformers==4.49.0");
+  const pinnedAt = pipCalls.findIndex((c) => c.args.includes("transformers==4.49.0"));
+  const reqAt = pipCalls.findIndex((c) => c.args.includes("-r"));
+  assert.ok(reqAt === -1 || pinnedAt > reqAt, "钉版必须发生在 -r requirements 之后（强制收敛版本）");
   // 权重：13 个文件全部从魔搭直连下载就位（含 Florence tokenizer 合并文件）
   assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_detect", "model.pt")));
   assert.ok(fs.existsSync(path.join(baseDir, "weights", "icon_caption_florence", "model.safetensors")));
