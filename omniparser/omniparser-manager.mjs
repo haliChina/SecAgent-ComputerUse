@@ -40,8 +40,8 @@ const WEIGHT_FILES = [
   { repo: "florence", path: "tokenizer.json", dest: "icon_caption_florence/tokenizer.json" },
   { repo: "florence", path: "tokenizer_config.json", dest: "icon_caption_florence/tokenizer_config.json" },
   { repo: "florence", path: "vocab.json", dest: "icon_caption_florence/vocab.json" },
-  // transformers 未钉版本：>=4.49 原生支持 Florence-2 时这些 .py 不会被用到；
-  // 老版本走 trust_remote_code 路径时缺它们必挂——约 185KB，双保险都带上。
+  // transformers 钉在 4.49.0：Florence-2 走 trust_remote_code 加载（pip 侧已强制钉版），
+  // 这三个 .py 是 remote code 的必经文件；4.53+ 的 tokenizers 新后端与其不兼容。
   { repo: "florence", path: "configuration_florence2.py", dest: "icon_caption_florence/configuration_florence2.py" },
   { repo: "florence", path: "modeling_florence2.py", dest: "icon_caption_florence/modeling_florence2.py" },
   { repo: "florence", path: "processing_florence2.py", dest: "icon_caption_florence/processing_florence2.py" }
@@ -333,6 +333,11 @@ export function createOmniParserManager(options = {}) {
         if (fs.existsSync(requirements)) {
           await runPip(["-r", requirements]);
         }
+        // 钉死 transformers（实机：4.53+ 重构了 tokenizer 后端，Florence-2 的 remote code
+        // 访问 tokenizer.additional_special_tokens 直接 AttributeError，服务起不来；
+        // 4.49 是 OmniParser 社区验证可用的稳定版）。放在 -r 之后强制收敛版本，
+        // 已装了坏版本的 venv 重跑一键安装即可自动降级，无需重建。
+        await runPip(["transformers==4.49.0"]);
         await runPip(["huggingface_hub", "fastapi", "uvicorn", "python-multipart"]);
         fs.rmSync(pipTmp, { recursive: true, force: true });
       } catch (error) {
