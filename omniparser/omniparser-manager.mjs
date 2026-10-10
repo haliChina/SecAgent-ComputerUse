@@ -5,16 +5,49 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawn as defaultSpawn } from "node:child_process";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const OMNI_REPO = "https://github.com/microsoft/OmniParser.git";
 const OMNI_ZIP = "https://github.com/microsoft/OmniParser/archive/refs/heads/master.zip";
-const OMNI_HF_REPO = "microsoft/OmniParser-v2.0";
 
-const SNAPSHOT_SNIPPET = [
-  "import os",
-  "from huggingface_hub import snapshot_download",
-  "snapshot_download(repo_id=%r, local_dir=os.environ['OMNI_W_TARGET'])"
-].join("\n");
+// ---- 模型权重多源下载（实机：hf-mirror.com 在部分国内网络不可达，魔搭为阿里云托管、国内直连稳定）----
+// 上游已把 icon_caption_florence 改名为 icon_caption（官方指引下载后 mv 回原名），且 Florence-2 的
+// processor/tokenizer 文件需从 Florence-2-base-ft 仓库另取——这里统一合并放进 icon_caption_florence 目录。
+const HF_REPOS = { omni: "microsoft/OmniParser-v2.0", florence: "microsoft/Florence-2-base-ft" };
+const WEIGHT_SOURCES = [
+  {
+    name: "ModelScope（魔搭）",
+    base: "https://modelscope.cn/models",
+    ref: "master",
+    repos: { omni: "AI-ModelScope/OmniParser-v2.0", florence: "AI-ModelScope/Florence-2-base-ft" }
+  },
+  {
+    name: "HuggingFace",
+    base: "https://huggingface.co",
+    ref: "main",
+    repos: HF_REPOS
+  }
+];
+const WEIGHT_FILES = [
+  { repo: "omni", path: "icon_detect/model.pt" },
+  { repo: "omni", path: "icon_detect/model.yaml" },
+  { repo: "omni", path: "icon_detect/train_args.yaml" },
+  { repo: "omni", path: "icon_caption/config.json", dest: "icon_caption_florence/config.json" },
+  { repo: "omni", path: "icon_caption/generation_config.json", dest: "icon_caption_florence/generation_config.json" },
+  { repo: "omni", path: "icon_caption/model.safetensors", dest: "icon_caption_florence/model.safetensors" },
+  { repo: "florence", path: "preprocessor_config.json", dest: "icon_caption_florence/preprocessor_config.json" },
+  { repo: "florence", path: "tokenizer.json", dest: "icon_caption_florence/tokenizer.json" },
+  { repo: "florence", path: "tokenizer_config.json", dest: "icon_caption_florence/tokenizer_config.json" },
+  { repo: "florence", path: "vocab.json", dest: "icon_caption_florence/vocab.json" },
+  // transformers 未钉版本：>=4.49 原生支持 Florence-2 时这些 .py 不会被用到；
+  // 老版本走 trust_remote_code 路径时缺它们必挂——约 185KB，双保险都带上。
+  { repo: "florence", path: "configuration_florence2.py", dest: "icon_caption_florence/configuration_florence2.py" },
+  { repo: "florence", path: "modeling_florence2.py", dest: "icon_caption_florence/modeling_florence2.py" },
+  { repo: "florence", path: "processing_florence2.py", dest: "icon_caption_florence/processing_florence2.py" }
+];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function defaultExec(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -28,7 +61,6 @@ function defaultExec(cmd, args, opts = {}) {
   });
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function createOmniParserManager(options = {}) {
   const baseDir = options.baseDir || path.join(os.homedir(), ".secagent", "computer-use", "omniparser");
@@ -138,6 +170,97 @@ export function createOmniParserManager(options = {}) {
     fs.rmSync(zipFile, { force: true });
   }
 
+  // ---- 权重多源下载 ----
+  // 逐文件、逐源尝试（魔搭优先），大文件走 Range 断点续传，空闲 60 秒自动中止防挂死。
+  function weightDest(file) {
+    return path.join(weightsDir, file.dest || file.path);
+  }
+
+  function missingWeightFiles() {
+    return WEIGHT_FILES.filter((file) => !fs.existsSync(weightDest(file)));
+  }
+
+  function buildWeightSources(hfMirror) {
+    const sources = [WEIGHT_SOURCES[0]]; // 魔搭：阿里云托管，国内直连稳定
+    if (hfMirror) {
+      sources.push({ name: `HuggingFace 镜像（${hfMirror}）`, base: hfMirror, ref: "main", repos: HF_REPOS });
+    }
+    sources.push(WEIGHT_SOURCES[1]); // HuggingFace 官方
+    return sources;
+  }
+
+  function weightUrl(source, file) {
+    return `${source.base}/${source.repos[file.repo]}/resolve/${source.ref}/${file.path}`;
+  }
+
+  // 单文件单源：续传 .part → 校验大小 → 原子改名就位
+  async function fetchWeightFile(source, file, onBytes) {
+    const dest = weightDest(file);
+    const part = `${dest}.part`;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    let resumeFrom = 0;
+    try { resumeFrom = fs.statSync(part).size; } catch { /* 无 .part，从零开始 */ }
+    const headers = {};
+    if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
+    // 空闲超时：慢网络下连接停滞 60 秒即中止，交给上层重试/换源，避免安装页无限转圈
+    const controller = new AbortController();
+    const stall = () => controller.abort(new Error("连接空闲超时（60 秒无数据）"));
+    let idle = setTimeout(stall, 60000);
+    const touch = () => { clearTimeout(idle); idle = setTimeout(stall, 60000); };
+    try {
+      const res = await fetchImpl(weightUrl(source, file), { headers, signal: controller.signal });
+      if (res.status === 404 || res.status === 410) {
+        const error = new Error(`HTTP ${res.status}（该源没有此文件）`);
+        error.skipSource = true;
+        throw error;
+      }
+      if (!res.ok && res.status !== 206) throw new Error(`HTTP ${res.status}`);
+      // 206 = 从 .part 续传；200 = 服务器不支持 Range（或本无 .part），整文件重下
+      const append = res.status === 206 && resumeFrom > 0;
+      if (!append) resumeFrom = 0;
+      const contentRange = res.headers?.get?.("content-range") || "";
+      const total = Number(String(contentRange || "").split("/")[1] || res.headers?.get?.("content-length") || 0);
+      let done = resumeFrom;
+      // fetch 返回 Web 流；测试可注入 Node 流——两种都接
+      const body = typeof res.body?.pipe === "function" ? res.body : Readable.fromWeb(res.body);
+      const counter = new Transform({
+        transform(chunk, encoding, callback) {
+          done += chunk.length;
+          touch();
+          try { onBytes?.(done, total); } catch { /* 进度回调不许影响下载 */ }
+          callback(null, chunk);
+        }
+      });
+      await pipeline(body, counter, fs.createWriteStream(part, append ? { flags: "a" } : { flags: "w" }));
+      const finalSize = fs.statSync(part).size;
+      if (total && finalSize !== total) {
+        throw new Error(`下载不完整（${finalSize}/${total} 字节），已保留断点`);
+      }
+      fs.renameSync(part, dest);
+    } finally {
+      clearTimeout(idle);
+    }
+  }
+
+  // 单文件：逐源尝试，每源瞬态失败重试一次；404 立即换源
+  async function downloadWeightFile(file, sources, onBytes) {
+    const errors = [];
+    for (const source of sources) {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          await fetchWeightFile(source, file, onBytes);
+          return;
+        } catch (error) {
+          errors.push(`${source.name}：${error.message}`);
+          log(`[omniparser] 权重源失败 ${source.name} 第 ${attempt} 次：${error.message}`);
+          if (error.skipSource) break; // 该源没有此文件，重试无意义
+          if (attempt === 1) await sleep(1500);
+        }
+      }
+    }
+    throw new Error(`权重 ${file.path} 下载失败（${errors.join("；")}）`);
+  }
+
   async function install(onProgress = () => {}) {
     if (phase === "installing") throw new Error("正在安装中");
     const hfMirror = String(getHfMirror() || "").trim();
@@ -231,17 +354,28 @@ export function createOmniParserManager(options = {}) {
         throw new Error(`依赖安装失败：${text}。${hint}`);
       }
 
-      setPhase("installing", "下载模型权重（约数百 MB）…", 70); onProgress({ phase, message, progress });
-      if (!fs.existsSync(path.join(weightsDir, "icon_detect"))) {
+      setPhase("installing", "下载模型权重（约 1.1 GB）…", 70); onProgress({ phase, message, progress });
+      const missing = missingWeightFiles();
+      if (missing.length > 0) {
         fs.mkdirSync(weightsDir, { recursive: true });
-        const hfEnv = hfMirror ? { HF_ENDPOINT: hfMirror } : {};
+        const sources = buildWeightSources(hfMirror);
         try {
-          await run(vpy, ["-c", SNAPSHOT_SNIPPET.replace("%r", JSON.stringify(OMNI_HF_REPO))],
-            { env: { ...process.env, OMNI_W_TARGET: weightsDir, ...hfEnv } });
+          for (let i = 0; i < missing.length; i += 1) {
+            const file = missing[i];
+            const label = `${i + 1}/${missing.length}`;
+            await downloadWeightFile(file, sources, (done, total) => {
+              const pct = total ? Math.min(100, Math.floor((done / total) * 100)) : 0;
+              setPhase("installing", `下载权重（${label}）：${file.path} ${pct}%`,
+                70 + Math.floor(((i + (total ? done / total : 1)) / missing.length) * 22));
+              onProgress({ phase, message, progress });
+            });
+          }
         } catch (error) {
           throw new Error(
-            `权重下载失败：${error.message}` +
-            (hfMirror ? "。请检查镜像地址是否可用。" : "。国内网络可在设置中填写 HuggingFace 镜像（如 https://hf-mirror.com）后重试。")
+            `权重下载失败：${error.message}。` +
+            "权重默认从魔搭（modelscope.cn，阿里云托管，国内一般可直连）下载，" +
+            "失败后依次尝试设置的 HuggingFace 镜像与官方源；网络不稳可直接重试，" +
+            "已下载完成的文件不会重复下载。"
           );
         }
       }
@@ -345,7 +479,7 @@ export function createOmniParserManager(options = {}) {
       phase, message, progress, endpoint,
       pid: child?.pid ?? null,
       hasVenv: fs.existsSync(venvPython()),
-      hasWeights: fs.existsSync(path.join(weightsDir, "icon_detect")),
+      hasWeights: missingWeightFiles().length === 0,
       hasSource: fs.existsSync(path.join(srcDir, "requirements.txt"))
     };
   }
