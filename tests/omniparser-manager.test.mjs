@@ -6,6 +6,19 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { createOmniParserManager } from "../omniparser/omniparser-manager.mjs";
+import { SERVER_PY } from "../omniparser/server-template.mjs";
+
+test("服务模板：加载前剥离 auto_map 的仓库前缀（离线加载 Florence-2 remote code）", () => {
+  // 实机：OmniParser 仓 icon_caption/config.json 的 auto_map 带
+  // "microsoft/Florence-2-base-ft--" 前缀，transformers 见前缀就去线上仓库
+  // 拉 configuration_florence2.py（AttributeError 后的下一个坑：连不上即崩）。
+  // 模板必须在模型加载前做幂等的本地化补丁。
+  assert.ok(SERVER_PY.includes("def _patch_local_automap"), "缺少 _patch_local_automap 定义");
+  assert.ok(SERVER_PY.includes("def _strip_repo_prefix"), "缺少 _strip_repo_prefix 定义");
+  assert.ok(SERVER_PY.includes("_patch_local_automap()"), "未在 _load 中调用补丁");
+  assert.ok(SERVER_PY.includes("config.json"), "补丁须覆盖 config.json");
+  assert.ok(SERVER_PY.includes("preprocessor_config.json"), "补丁须覆盖 preprocessor_config.json");
+});
 
 function tmpDir() {
   const dir = path.join(os.tmpdir(), "cu-mgr-" + crypto.randomUUID());
