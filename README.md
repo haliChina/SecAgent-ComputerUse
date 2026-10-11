@@ -183,6 +183,7 @@ npm run pack       # 生成 release/computer-use-<version>.zip
 - **WinError 32（文件被占用）**：杀毒软件正在扫描刚下载的包，把 ~/.secagent/computer-use 加入杀毒白名单或暂时关闭实时防护后重试。
 - **权重下载失败/hf-mirror.com 不可达**：权重默认走魔搭（modelscope.cn）直连，无需镜像；可直接重试，已完成的文件自动跳过、断点文件自动续传。
 - **服务未在超时内就绪（TokenizersBackend has no attribute additional_special_tokens）**：transformers 版本过新（4.53+ 的 tokenizer 后端与 Florence-2 remote code 不兼容）——升级插件到 0.5.8+ 后重新一键安装即可（依赖已装齐时只做版本降级，权重不会重下）。
+- **服务未在超时内就绪（couldn't connect to 'https://modelscope.cn' … configuration_florence2.py）**：config.json 的 auto_map 带仓库前缀（`microsoft/Florence-2-base-ft--`），transformers 见前缀就去线上仓库拉 remote code 而不用本地文件——升级到 0.5.9+ 后重新一键安装（秒级），启动时会自动剥离前缀、完全离线加载。
 - **inspect 列不出元素**：目标软件可能是自绘 UI/游戏，改用 OmniParser；管理员窗口需提权。
 - **任务栏/桌面图标点不到**：默认只看前台窗口，用 `inspect(scope="desktop")`，或先 `windows` 找到窗口再 `focus`。
 - **点击位置偏移**：确认截图与动作在同一 DPI 上下文（插件已自动处理）；若中途改过截图设置，请重新截图后再用坐标动作。

@@ -21,6 +21,46 @@ _detect = None
 _cap_model = None
 _cap_proc = None
 
+def _strip_repo_prefix(value):
+    # "microsoft/Florence-2-base-ft--configuration_florence2.Florence2Config"
+    #   -> "configuration_florence2.Florence2Config"（按本地目录解析）
+    # 仅当 head 形如 owner/repo 且 tail 是 module.Class 时才剥，避免误伤。
+    if isinstance(value, str) and "--" in value:
+        head, _, tail = value.partition("--")
+        if "/" in head and "." in tail:
+            return tail
+    if isinstance(value, list):
+        return [_strip_repo_prefix(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _strip_repo_prefix(v) for k, v in value.items()}
+    return value
+
+def _patch_local_automap():
+    # 实机：OmniParser 仓 icon_caption/config.json 的 auto_map 带
+    # "microsoft/Florence-2-base-ft--" 前缀——transformers 见前缀就去线上仓库
+    # 拉 configuration_florence2.py（经 HF_ENDPOINT 到 modelscope），连不上即崩，
+    # 而本地 3 个 remote code .py 明明就在旁边。剥掉前缀后按本地目录解析，
+    # 完全离线加载。幂等：无前缀时不改写文件。
+    import json
+    base = os.path.join(WEIGHTS_DIR, "icon_caption_florence")
+    for name in ("config.json", "preprocessor_config.json", "tokenizer_config.json"):
+        p = os.path.join(base, name)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            automap = data.get("auto_map")
+            if not isinstance(automap, dict):
+                continue
+            stripped = {k: _strip_repo_prefix(v) for k, v in automap.items()}
+            if stripped != automap:
+                data["auto_map"] = stripped
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # 配置不可读/不可写不挡启动，交给后续报错分诊
+
 def _load():
     global _torch, _detect, _cap_model, _cap_proc
     if _detect is not None:
@@ -29,6 +69,7 @@ def _load():
     _torch = torch
     use_cuda = torch.cuda.is_available() and DEVICE == "cuda"
     dtype = torch.float16 if use_cuda else torch.float32
+    _patch_local_automap()
     detect_path = os.path.join(WEIGHTS_DIR, "icon_detect")
     detect_pt = os.path.join(detect_path, "model.pt")
     if not os.path.exists(detect_pt):
