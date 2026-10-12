@@ -184,6 +184,7 @@ npm run pack       # 生成 release/computer-use-<version>.zip
 - **权重下载失败/hf-mirror.com 不可达**：权重默认走魔搭（modelscope.cn）直连，无需镜像；可直接重试，已完成的文件自动跳过、断点文件自动续传。
 - **服务未在超时内就绪（TokenizersBackend has no attribute additional_special_tokens）**：transformers 版本过新（4.53+ 的 tokenizer 后端与 Florence-2 remote code 不兼容）——升级插件到 0.5.8+ 后重新一键安装即可（依赖已装齐时只做版本降级，权重不会重下）。
 - **服务未在超时内就绪（couldn't connect to 'https://modelscope.cn' … configuration_florence2.py）**：config.json 的 auto_map 带仓库前缀（`microsoft/Florence-2-base-ft--`），transformers 见前缀就去线上仓库拉 remote code 而不用本地文件——升级到 0.5.9+ 后重新一键安装（秒级），启动时会自动剥离前缀、完全离线加载。
+- **inspect 对自绘界面（QQ音乐等）失败/元素为 0，模型只能目测坐标空转**：0.5.x 的 auto 模式下 OmniParser 超时会把 UIA 已有结果一起丢掉、整个 inspect 抛错；0.6.0 起 auto 模式自动降级保留 UIA 结果并附分诊警告。同时 `/parse` 客户端超时默认放宽到 90 秒（CPU 推理一屏几十个元素属正常慢，可在设置「OmniParser 响应超时」调整），服务端 caption 由 beams=3/max_new_tokens=256 收敛为 greedy/32（CPU 快一个数量级）。若仍超时，错误会明确区分「服务未启动」与「服务在跑但推理慢」。
 - **inspect 列不出元素**：目标软件可能是自绘 UI/游戏，改用 OmniParser；管理员窗口需提权。
 - **任务栏/桌面图标点不到**：默认只看前台窗口，用 `inspect(scope="desktop")`，或先 `windows` 找到窗口再 `focus`。
 - **点击位置偏移**：确认截图与动作在同一 DPI 上下文（插件已自动处理）；若中途改过截图设置，请重新截图后再用坐标动作。
