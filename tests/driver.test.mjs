@@ -383,6 +383,41 @@ test("inspect backend=omniparser 直接使用视觉后端", async () => {
   assert.match(out, /"x"/);
 });
 
+test("inspect auto：OmniParser 失败时降级保留 UIA 结果并附分诊警告（0.6.0 实机回归）", async () => {
+  // 0.5.x 实机：QQ音乐等自绘 UI 上 UIA 只有 0 元素 → auto 回退 OmniParser →
+  // CPU 推理 >20s 超时 → 整个 inspect 抛错，模型退化成纯目测坐标、20 轮耗尽。
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const refused = async () => { throw new Error("connect ECONNREFUSED 127.0.0.1:8000"); };
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner(uiaEls), // 1 个元素 < minElements(3)，会触发 OmniParser 回退
+    omniEndpoint: "http://127.0.0.1:8000",
+    fetchImpl: refused
+  });
+  const out = await driver.inspect();
+  // UIA 的结果保住了
+  assert.match(out, /Windows UI Automation/);
+  // OmniParser 的失败原因与出路都在
+  assert.match(out, /OmniParser 兜底未生效/);
+  assert.match(out, /ECONNREFUSED/);
+  assert.match(out, /交叉核对/);
+});
+
+test("inspect backend=omniparser 失败时仍抛错（点名后端不静默换）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const refused = async () => { throw new Error("connect ECONNREFUSED 127.0.0.1:8000"); };
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner(uiaEls),
+    omniEndpoint: "http://127.0.0.1:8000",
+    fetchImpl: refused
+  });
+  await assert.rejects(
+    () => driver.inspect({ backend: "omniparser" }),
+    /服务大概率没有运行/
+  );
+});
+
 test("drag 长距离分步插值：产生 mouse-move 事件流且终点精确", async () => {
   const native = makeFakeNative();
   const driver = new WindowsDriver({ native });

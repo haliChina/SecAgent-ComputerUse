@@ -268,19 +268,29 @@ export class WindowsDriver {
     const needOmni =
       useBackend === "omniparser" ||
       (useBackend === "auto" && map && map.total < cfg.minElements && omniEndpoint);
+    let omniError = null;
     if (needOmni) {
       const imageBase64 = encodePNG(capture).toString("base64");
-      const detections = await parseWithOmniParser({
-        endpoint: omniEndpoint,
-        imageBase64,
-        fetchImpl: this.fetchImpl
-      });
-      const om = buildElementMap(detections, "omniparser", {
-        cap: cfg.maxElements,
-        clickableOnly: useClickable
-      });
-      if (useBackend === "omniparser" || (om.total > 0 && (!map || om.total > map.total)))
-        map = om;
+      try {
+        const detections = await parseWithOmniParser({
+          endpoint: omniEndpoint,
+          imageBase64,
+          fetchImpl: this.fetchImpl,
+          timeout: cfg.omniTimeoutMs
+        });
+        const om = buildElementMap(detections, "omniparser", {
+          cap: cfg.maxElements,
+          clickableOnly: useClickable
+        });
+        if (useBackend === "omniparser" || (om.total > 0 && (!map || om.total > map.total)))
+          map = om;
+      } catch (error) {
+        // 0.5.x 实机：auto 模式下 OmniParser 超时会把 UIA 已拿到的结果一起丢掉，
+        // 整个 inspect 抛错，模型退化成纯目测坐标、20 轮耗尽任务。
+        // 现在：auto 降级用 UIA 结果继续；显式 omniparser 才抛（模型点名要它，静默换后端反而误导）。
+        if (useBackend === "omniparser") throw error;
+        omniError = error;
+      }
     }
 
     if (!map) map = buildElementMap([], "uia", { cap: cfg.maxElements });
@@ -296,11 +306,15 @@ export class WindowsDriver {
     };
     // UIA 挂了且最终没有元素：明确告知原因与出路，别让模型猜「界面没有元素」
     const warning =
-      uiaError && map.total === 0 && useBackend !== "omniparser"
+      (uiaError && map.total === 0 && useBackend !== "omniparser"
         ? `\n⚠ UIA 侦察失败：${uiaError?.message ?? String(uiaError)}。` +
           `目标可能是自绘 UI/游戏，或权限不足（管理员窗口需提权）。` +
           `可运行 doctor 自检，或在设置控制台启用 OmniParser 后用 backend="omniparser" 重试。`
-        : "";
+        : "") +
+      (omniError
+        ? `\n⚠ OmniParser 兜底未生效（auto 模式已降级为 UIA 结果）：${omniError.message}。` +
+          `界面为自绘 UI 时元素可能偏少，坐标请配合 screenshot 目测交叉核对。`
+        : "");
     // 前台是宿主自身（0.5.4 实机踩坑：模型 focus 不到动态标题窗口，
     // 对着 SecAgent 自己的活动流点了 20+ 次）。此时仍返回元素（兼容
     // 自测场景），但醒目提示先 focus 目标窗口。
