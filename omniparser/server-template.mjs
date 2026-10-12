@@ -94,9 +94,12 @@ def _florence(pil_crop, task):
     else:
         inputs = {k: v for k, v in inputs.items()}
     with _torch.no_grad():
+        # icon caption 的输出是一两个短语（OmniParser 官方即按 <CAPTION> 短描述使用）：
+        # greedy + 32 token 足够，且 CPU 上比 beams=3/max_new_tokens=256 快一个数量级
+        # （0.5.x 实机：beams=3×256 让 CPU 一屏几十个元素推理 >20s，客户端 20s 超时全部失败）。
         ids = _cap_model.generate(
             input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"],
-            max_new_tokens=256, num_beams=3, do_sample=False
+            max_new_tokens=32, num_beams=1, do_sample=False
         )
     text = _cap_proc.batch_decode(ids, skip_special_tokens=False)[0]
     parsed = _cap_proc.post_process_generation(text, task=task, image_size=(pil_crop.height, pil_crop.width))
