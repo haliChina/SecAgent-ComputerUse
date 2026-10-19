@@ -10,7 +10,7 @@
 - 格式：SecAgent 自有插件（`secagent-plugin.json` + `main.mjs`）
 - 系统：动作仅 Windows（依赖 user32/gdi32 + PowerShell）；设置控制台在任意平台可打开
 - 运行时依赖：[koffi](https://koffi.dev/)（FFI，随发布包打包，无需用户安装）
-- 模型要求：主模型必须是**视觉多模态模型**（如 GPT-4o/5、Qwen-VL、GLM-4.5V、Gemini、豆包 Vision、Claude）
+- 模型要求：主模型必须是**VLM**（如 GPT-6A、Qwen-3.8Flash、GLM-5.3Flash、Gemini-4A、豆包-2.1Pro、Claude-Opus5.5）
 
 ## 提供的工具
 
