@@ -3,6 +3,7 @@
 
 export const SETTING_GROUPS = [
   { id: "perception", title: "感知（元素地图）", description: "inspect 如何列出界面元素。" },
+  { id: "extension", title: "浏览器扩展桥", description: "与「SecAgent 浏览器桥」扩展配对后，网页元素走 DOM 直读（快且准）。" },
   { id: "omniparser", title: "本地视觉兜底（OmniParser）", description: "UIA 覆盖不到时的本地视觉模型，可一键安装。" },
   { id: "reasoning", title: "思考提醒", description: "模型思考过久或反复横跳时，温和提醒其收敛。" },
   { id: "actions", title: "动作", description: "点击、滚动等操作的默认行为。" },
@@ -16,8 +17,9 @@ export const SETTING_FIELDS = [
   // —— 感知 ——
   { key: "backend", group: "perception", type: "select", default: "auto",
     options: [
-      { value: "auto", label: "自动（UIA 优先，不足回退 OmniParser）" },
+      { value: "auto", label: "自动（UIA 优先，浏览器扩展 / OmniParser 兜底）" },
       { value: "uia", label: "仅 UIA（Windows 系统控件）" },
+      { value: "extension", label: "仅浏览器扩展（页面 DOM，需配对扩展）" },
       { value: "omniparser", label: "仅 OmniParser（视觉模型）" }
     ],
     label: "感知后端", effect: "immediate" },
@@ -28,7 +30,7 @@ export const SETTING_FIELDS = [
   { key: "uiaTimeoutMs", group: "perception", type: "number", default: 15000, min: 3000, max: 60000, step: 1000,
     label: "UIA 查询超时（毫秒）", effect: "immediate" },
   { key: "minElements", group: "perception", type: "number", default: 3, min: 0, max: 20, step: 1,
-    label: "自动回退阈值", hint: "UIA 元素少于该数量时回退 OmniParser。", effect: "immediate" },
+    label: "自动回退阈值", hint: "UIA 元素少于该数量时，依次尝试浏览器扩展（已配对时）、OmniParser。", effect: "immediate" },
   { key: "maxSidePixels", group: "perception", type: "number", default: 1568, min: 0, max: 4096, step: 8,
     label: "截图长边上限 / 模型坐标分辨率（像素）",
     hint: "0 = 不缩放。默认值 1568 与 Claude computer-use 一致。若主模型是坐标接地模型（UI-TARS、OSWorld 系 grounding 模型等），请把它设成该模型输出的坐标分辨率（如 1920×1080），落点最稳。系统会在执行前自动换算回物理像素。",
@@ -39,6 +41,15 @@ export const SETTING_FIELDS = [
       { value: "desktop", label: "整个桌面（含任务栏/桌面图标，慢）" }
     ],
     label: "UIA 侦察范围", effect: "immediate" },
+
+  // —— 浏览器扩展桥 ——
+  { key: "extBridgeEnabled", group: "extension", type: "boolean", default: true,
+    label: "启用浏览器扩展桥",
+    hint: "开启后在本机随机端口监听，等待「SecAgent 浏览器桥」扩展配对连接。", effect: "immediate" },
+  { key: "extMaxElements", group: "extension", type: "number", default: 80, min: 5, max: 200, step: 1,
+    label: "扩展元素数量上限", hint: "DOM 直读很快，可比 UIA 略多；超过后截断。", effect: "immediate" },
+  { key: "extReadMaxChars", group: "extension", type: "number", default: 12000, min: 500, max: 200000, step: 500,
+    label: "read_page 文本上限（字符）", hint: "读页面可见文本的截断长度。", effect: "immediate" },
 
   // —— OmniParser ——
   { key: "omniEnabled", group: "omniparser", type: "boolean", default: false,

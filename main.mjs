@@ -10,6 +10,7 @@ import { CONSOLE_HTML } from "./settings/console-page.mjs";
 import { createOmniParserManager } from "./omniparser/omniparser-manager.mjs";
 import { SERVER_PY } from "./omniparser/server-template.mjs";
 import { createNudge } from "./reasoning/nudge.mjs";
+import { createExtensionBridge } from "./driver/extension-bridge.mjs";
 
 const pointSchema = (extra = {}) => ({
   type: "object",
@@ -37,6 +38,7 @@ const STATIC_RULES = `## 电脑操作规则（Computer Use）
 - 需要输入文字时，先按 elementId 点击输入框使其聚焦，再 type；需要快捷键时用 key。
 - 要打开别的程序：优先 launch(command) 或 focus(title 窗口标题正则)，不要靠盲点任务栏图标。
 - 若 UIA 元素过少（自绘界面、游戏、Canvas），在已启用 OmniParser 时用 inspect(backend="omniparser")；要看任务栏/桌面图标用 inspect(scope="desktop")。
+- 浏览器网页任务：已配对「SecAgent 浏览器桥」扩展时，用 inspect(backend="extension") 直读页面 DOM（毫秒级、真实元素结构，远快于截图目测）；配合 tabs 切换标签页、read_page 读页面全文。扩展未配对时正常走 auto（UIA/OmniParser）。
 - 每个方案最多自我反驳一轮，禁止在两个位置或方案间反复横跳；连续 2 次动作无进展就换思路或向用户说明卡点。
 - 信息无法再获取时，选择可逆、下行风险小的动作，并明确标注不确定之处；不要为求最优而无限权衡。`;
 
@@ -58,8 +60,14 @@ export async function activate(api) {
 
   const initial = readConfig();
 
-  // driver 通过 configProvider 动态读取设置（含 OmniParser 开关）。
-  const driver = new WindowsDriver({ configProvider: readConfig });
+  // 浏览器扩展桥（设置可关；仅 127.0.0.1 + 配对码）。
+  const extBridge = createExtensionBridge({
+    getConfig: readConfig,
+    isEnabled: () => readConfig().extBridgeEnabled !== false
+  });
+
+  // driver 通过 configProvider 动态读取设置（含 OmniParser 开关 / 扩展桥）。
+  const driver = new WindowsDriver({ configProvider: readConfig, extBridge });
 
   // OmniParser 一键安装管理器（数据在用户主目录，不随插件包分发）。
   // 镜像地址从设置动态读取，安装/启动时生效。
@@ -73,11 +81,17 @@ export async function activate(api) {
   // 本地设置控制台。
   const settingsServer = createSettingsServer({
     getConfig: readConfig,
-    setConfig: persistConfig,
+    setConfig: (config) => {
+      persistConfig(config);
+      // 扩展桥开关即时生效（无需重载插件）。
+      extBridge.setEnabled(config.extBridgeEnabled !== false).catch(() => {});
+    },
     manager,
+    extBridge,
     pageHtml: CONSOLE_HTML
   });
   await settingsServer.start();
+  if (initial.extBridgeEnabled !== false) await extBridge.start().catch(() => {});
 
   // 原生设置 handler（宿主未来在设置页渲染表单时使用；当前用 HTTP 控制台）。
   if (typeof api.registerSettingsHandler === "function") {
@@ -91,11 +105,18 @@ export async function activate(api) {
           const merged = mergeConfig({ ...readConfig(), ...(args || {}) }).config;
           persistConfig(merged);
           if (args.omniEndpoint) manager.setEndpoint(merged.omniEndpoint);
+          await extBridge.setEnabled(merged.extBridgeEnabled !== false).catch(() => {});
           return merged;
         }
         case "reset":
           persistConfig({ ...DEFAULT_CONFIG });
+          await extBridge.setEnabled(true).catch(() => {});
           return { ...DEFAULT_CONFIG };
+        case "ext-status":
+          return extBridge.status();
+        case "ext-reset":
+          extBridge.resetToken();
+          return extBridge.status();
         case "omni-status":
           return manager.status();
         case "omni-install":
@@ -152,7 +173,7 @@ export async function activate(api) {
     {
       name: "doctor",
       description:
-        "安装后先运行本工具做环境自检：逐项验证操作系统、系统库加载、屏幕探针、UIA/PowerShell、Python、OmniParser 状态。首次使用或动作失败时先调用，失败项会给出修复建议。",
+        "安装后先运行本工具做环境自检：逐项验证操作系统、系统库加载、屏幕探针、UIA/PowerShell、浏览器扩展桥、Python、OmniParser 状态。首次使用或动作失败时先调用，失败项会给出修复建议。",
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       hidden: false
     },
@@ -160,7 +181,8 @@ export async function activate(api) {
       const result = await runDoctor({
         loadNative: () => createKoffiNative(),
         detectPython: () => manager.detectPython(),
-        getOmniStatus: () => manager.status()
+        getOmniStatus: () => manager.status(),
+        getExtStatus: () => extBridge.status()
       });
       return {
         ok: result.ok,
@@ -229,11 +251,15 @@ export async function activate(api) {
         properties: {
           backend: {
             type: "string",
-            enum: ["auto", "uia", "omniparser"],
-            description: "缺省取设置；auto=UIA 优先、元素过少时回退 OmniParser"
+            enum: ["auto", "uia", "extension", "omniparser"],
+            description:
+              "缺省取设置；auto=UIA 优先，元素过少时回退浏览器扩展（已配对）再 OmniParser；" +
+              "extension=浏览器页面 DOM 直读（毫秒级、真实结构，网页任务首选，需配对扩展）；" +
+              "omniparser=本地视觉模型"
           },
           annotate: { type: "boolean", description: "true 返回带编号框的标注图" },
           clickableOnly: { type: "boolean", description: "OmniParser 下是否只保留可点元素" },
+          tabId: { type: "integer", description: "仅 extension 后端：目标标签页编号（tabs 工具可获得），缺省为最近聚焦的标签页" },
           scope: {
             type: "string",
             enum: ["foreground", "desktop"],
@@ -251,9 +277,57 @@ export async function activate(api) {
           backend: a.backend,
           annotate: a.annotate === true,
           clickableOnly: a.clickableOnly,
-          scope: a.scope
+          scope: a.scope,
+          tabId: a.tabId
         })
     )
+  );
+
+  // 2.5) 浏览器标签页（需配对扩展）
+  api.registerTool(
+    {
+      name: "tabs",
+      description:
+        "浏览器标签页管理：列出所有标签页（含窗口与激活状态），或把指定标签页切到前台。需先配对「SecAgent 浏览器桥」扩展（设置控制台「浏览器扩展桥」卡片）。比 UIA 切标签页快且稳。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          action: { type: "string", enum: ["list", "focus"], description: "list=列出全部标签页（默认）；focus=切到指定标签页" },
+          tabId: { type: "integer", description: "focus 时必填：目标标签页编号（来自 list 结果）" }
+        }
+      },
+      hidden: false
+    },
+    guarded("tabs", async (a) => {
+      const action = a.action ?? "list";
+      if (action === "focus") {
+        if (a.tabId == null) throw new Error("focus 需要 tabId（先用 action=\"list\" 获取）");
+        return await extBridge.focusTab(a.tabId);
+      }
+      return await extBridge.listTabs();
+    })
+  );
+
+  api.registerTool(
+    {
+      name: "read_page",
+      description:
+        "读取浏览器当前标签页（或指定标签页）的可见文本（innerText，保留布局、跳过隐藏内容）。适合读文章/文档/搜索结果。需配对「SecAgent 浏览器桥」扩展。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          tabId: { type: "integer", description: "目标标签页编号（缺省为最近聚焦的标签页）" },
+          maxChars: { type: "integer", description: "截断长度，缺省取设置（约 12000 字符）" }
+        }
+      },
+      hidden: false
+    },
+    guarded("read_page", async (a) => {
+      const maxChars = a.maxChars ?? readConfig().extReadMaxChars ?? 12000;
+      return await extBridge.readPage({ ...(a.tabId != null ? { tabId: a.tabId } : {}), maxChars });
+    })
   );
 
   // 3.1) 窗口列表 / 聚焦 / 启动 / 剪贴板
@@ -516,6 +590,7 @@ export async function activate(api) {
   }
 
   return async () => {
+    await extBridge.stop().catch(() => {});
     await settingsServer.stop().catch(() => {});
     await manager.stop().catch(() => {});
   };

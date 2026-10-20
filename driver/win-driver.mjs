@@ -15,6 +15,7 @@ import { encodePNG } from "./png.mjs";
 import { computeScale, scaleImage } from "./scale.mjs";
 import { parseChord, isModifier } from "./keycodes.mjs";
 import { inspectViaUia } from "./uia-inspect.mjs";
+import { elementToPhysical, withinVirtualScreen } from "./ext-coords.mjs";
 import { buildElementMap, describeElements, findElement, toDisplayMap, DEFAULT_CAP } from "./element-map.mjs";
 import { parseWithOmniParser } from "./omniparser.mjs";
 import { drawSom } from "./draw-som.mjs";
@@ -79,7 +80,8 @@ export class WindowsDriver {
     maxElements, minElements = 3,
     uiaTimeoutMs = 15000, clickableOnly = true,
     maxSidePixels = 0,
-    configProvider
+    configProvider,
+    extBridge = null
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
@@ -87,6 +89,7 @@ export class WindowsDriver {
     this.uiaRunner = uiaRunner;
     this.omniEndpoint = omniEndpoint;
     this.fetchImpl = fetchImpl;
+    this.extBridge = extBridge;
     this.maxElements = maxElements ?? DEFAULT_CAP;
     this.minElements = minElements;
     this.uiaTimeoutMs = uiaTimeoutMs;
@@ -227,13 +230,14 @@ export class WindowsDriver {
   }
 
   /**
-   * 侦察当前屏幕的可交互元素（UIA 优先，OmniParser 兜底）。
+   * 侦察当前屏幕的可交互元素（UIA 优先，浏览器扩展 / OmniParser 兜底）。
    * @param {object} [opts]
-   * @param {"auto"|"uia"|"omniparser"} [opts.backend] 缺省取设置 backend
+   * @param {"auto"|"uia"|"omniparser"|"extension"} [opts.backend] 缺省取设置 backend
    * @param {boolean} [opts.annotate=false] true 返回带编号框的 SoM 标注图，否则返回文本清单
    * @param {boolean} [opts.clickableOnly] 缺省取设置 clickableOnly
+   * @param {number} [opts.tabId] 目标标签页（仅 extension 后端；缺省取最近聚焦的浏览器标签页）
    */
-  async inspect({ backend, annotate = false, clickableOnly, scope } = {}) {
+  async inspect({ backend, annotate = false, clickableOnly, scope, tabId } = {}) {
     const cfg = this.#cfg();
     const useBackend = backend ?? cfg.backend ?? "auto";
     const useClickable = clickableOnly ?? cfg.clickableOnly ?? true;
@@ -262,6 +266,40 @@ export class WindowsDriver {
       }
       map = buildElementMap(uiaRaw, "uia", { cap: cfg.maxElements });
     }
+
+    // 浏览器扩展（DOM）：显式点名直接用；auto 且 UIA 元素稀疏时先于
+    // OmniParser 尝试（本地毫秒级 vs 视觉模型 20s+，网页场景 DOM 即真值）。
+    let extError = null;
+    let extTabInfo = null;
+    const extConnected = !!this.extBridge && this.extBridge.status().connected;
+    if (useBackend === "extension" && !this.extBridge)
+      throw new Error("浏览器扩展桥未启用：请在设置控制台开启「浏览器扩展桥」并完成配对（见 docs/EXTENSION.md）。");
+    const needExt =
+      useBackend === "extension" || (useBackend === "auto" && map && map.total < cfg.minElements && extConnected);
+    if (needExt) {
+      try {
+        const ext = await this.extBridge.collectElements({
+          ...(tabId != null ? { tabId } : {}),
+          max: cfg.extMaxElements ?? cfg.maxElements
+        });
+        extTabInfo = ext.tab ?? null;
+        const viewport = { ...(ext.viewport ?? {}), zoom: ext.zoom ?? 1 };
+        const virtual = { x: capture.origin.x, y: capture.origin.y, w: capture.width, h: capture.height };
+        // DOM 元素 → 物理屏幕坐标；混合 DPI / 怪异窗口形态可能算飞，兜底过滤。
+        const rawList = (ext.elements ?? [])
+          .map((el) => ({ ...el, bbox: elementToPhysical(el, viewport) }))
+          .filter((el) => withinVirtualScreen(el.bbox, virtual));
+        const extMap = buildElementMap(rawList, "extension", { cap: cfg.maxElements });
+        if (useBackend === "extension" || (extMap.total > 0 && (!map || extMap.total > map.total)))
+          map = extMap;
+      } catch (error) {
+        // 与 OmniParser 同策略：auto 降级继续（UIA 结果还在），显式 extension 才抛。
+        if (useBackend === "extension") throw error;
+        extError = error;
+      }
+    }
+    if (useBackend === "extension" && !extConnected && this.extBridge)
+      throw new Error("浏览器扩展未连接：请确认扩展已安装并在配对页填入端口与配对码（设置控制台「浏览器扩展桥」卡片），或改用 backend=\"auto\"。");
 
     // 仅在显式启用 OmniParser 时提供该后端地址。
     const omniEndpoint = cfg.omniEnabled ? cfg.omniEndpoint : undefined;
@@ -306,15 +344,24 @@ export class WindowsDriver {
     };
     // UIA 挂了且最终没有元素：明确告知原因与出路，别让模型猜「界面没有元素」
     const warning =
-      (uiaError && map.total === 0 && useBackend !== "omniparser"
+      (uiaError && map.total === 0 && useBackend !== "omniparser" && useBackend !== "extension"
         ? `\n⚠ UIA 侦察失败：${uiaError?.message ?? String(uiaError)}。` +
           `目标可能是自绘 UI/游戏，或权限不足（管理员窗口需提权）。` +
           `可运行 doctor 自检，或在设置控制台启用 OmniParser 后用 backend="omniparser" 重试。`
+        : "") +
+      (extError
+        ? `\n⚠ 浏览器扩展兜底未生效（auto 模式已降级为 UIA 结果）：${extError.message}。`
         : "") +
       (omniError
         ? `\n⚠ OmniParser 兜底未生效（auto 模式已降级为 UIA 结果）：${omniError.message}。` +
           `界面为自绘 UI 时元素可能偏少，坐标请配合 screenshot 目测交叉核对。`
         : "");
+    // 扩展元素来自某个标签页：把标签页上下文写给模型（点错窗口/标签是高频翻车点）。
+    const tabLine =
+      extTabInfo && map.source === "extension"
+        ? `\n📎 元素来自标签页「${(extTabInfo.title || "").slice(0, 60)}」（${(extTabInfo.url || "").slice(0, 100)}）。` +
+          `若这不是你想操作的页面，先用 tabs 工具切换标签页再重新 inspect。`
+        : "";
     // 前台是宿主自身（0.5.4 实机踩坑：模型 focus 不到动态标题窗口，
     // 对着 SecAgent 自己的活动流点了 20+ 次）。此时仍返回元素（兼容
     // 自测场景），但醒目提示先 focus 目标窗口。
@@ -336,6 +383,7 @@ export class WindowsDriver {
           type: "text",
           text:
             selfWarning +
+            tabLine +
             "\n" +
             this.#geometryText(image, capture) +
             "\n框内数字即元素编号，点击时用 click(elementId)。元素清单：\n" +
@@ -344,8 +392,8 @@ export class WindowsDriver {
         }
       ];
     }
-    const text = selfWarning + describeElements(displayMap, geometry);
-    return warning ? text + warning : text;
+    const text = selfWarning + tabLine + describeElements(displayMap, geometry);
+    return warning || tabLine ? text + (warning || "") : text;
   }
 
   async move(x, y) {

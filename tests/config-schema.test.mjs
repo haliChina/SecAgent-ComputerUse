@@ -9,12 +9,24 @@ test("默认配置完整且字段默认值一致", () => {
   assert.equal(DEFAULT_CONFIG.maxElements, 60);
   assert.equal(DEFAULT_CONFIG.omniEnabled, false);
   assert.equal(DEFAULT_CONFIG.nudgeEnabled, true);
+  // 浏览器扩展桥
+  assert.equal(DEFAULT_CONFIG.extBridgeEnabled, true);
+  assert.equal(DEFAULT_CONFIG.extMaxElements, 80);
+  assert.equal(DEFAULT_CONFIG.extReadMaxChars, 12000);
   for (const field of SETTING_FIELDS) {
     assert.ok(Object.prototype.hasOwnProperty.call(DEFAULT_CONFIG, field.key));
   }
-  // 五个分组
+  // 六个分组（0.7.0 新增 extension）
   assert.deepEqual(describeSettings().map((g) => g.id),
-    ["perception", "omniparser", "reasoning", "actions", "safety"]);
+    ["perception", "extension", "omniparser", "reasoning", "actions", "safety"]);
+});
+
+test("扩展桥字段归一化：布尔/数值边界", () => {
+  assert.equal(normalizeField("extBridgeEnabled", "false"), false);
+  assert.equal(normalizeField("extMaxElements", 99999), 200);
+  assert.equal(normalizeField("extMaxElements", 1), 5);
+  assert.equal(normalizeField("extReadMaxChars", 100), 500);
+  assert.equal(normalizeField("backend", "extension"), "extension");
 });
 
 test("空配置合并后得到全部默认值", () => {

@@ -67,11 +67,36 @@ export function normalizeOmniParser(item, index) {
 }
 
 /**
+ * 归一化一条浏览器扩展元素记录。
+ * 入参约定：bbox 已是**物理屏幕坐标**（由 extension-bridge 用 ext-coords 换算好），
+ * name/role/tag 来自页面 DOM。url（链接目标，截断）作为补充上下文保留。
+ */
+export function normalizeExtension(raw, index) {
+  const b = raw.bbox;
+  if (!b || !(b.w > 0) || !(b.h > 0)) return null;
+  return {
+    id: index,
+    name: typeof raw.name === "string" ? raw.name : "",
+    role: raw.role || raw.tag || "custom",
+    automationId: raw.automationId ?? "",
+    bbox: { x: intv(b.x), y: intv(b.y), w: intv(b.w), h: intv(b.h) },
+    cx: intv(b.x + b.w / 2),
+    cy: intv(b.y + b.h / 2),
+    enabled: raw.enabled !== false,
+    clickable: true,
+    source: "extension"
+  };
+}
+
+/**
  * 构建元素地图：归一化 → 过滤 → 截断 → 连续编号。
  * @returns {{elements:Array,total:number,truncated:boolean,source:string}}
  */
 export function buildElementMap(rawList, source, { cap = DEFAULT_CAP, clickableOnly = false } = {}) {
-  const normalizer = source === "uia" ? normalizeUia : normalizeOmniParser;
+  const normalizer =
+    source === "uia" ? normalizeUia :
+    source === "extension" ? normalizeExtension :
+    normalizeOmniParser;
   let recs = (rawList ?? []).map((r, i) => normalizer(r, i)).filter(Boolean);
   if (source === "omniparser" && clickableOnly) recs = recs.filter((r) => r.clickable);
   const total = recs.length;
@@ -112,7 +137,12 @@ export function describeElements(map, geometry = {}) {
     const state = e.enabled ? "" : " (禁用)";
     return `#${e.id} [${e.role}] "${nm}" bbox=(${e.bbox.x},${e.bbox.y},${e.bbox.w},${e.bbox.h})${state}`;
   });
-  let head = `检测到 ${total} 个元素（来源：${source === "uia" ? "Windows UI Automation" : "OmniParser"}）`;
+  const SOURCE_LABELS = {
+    uia: "Windows UI Automation",
+    extension: "浏览器扩展（页面 DOM，坐标即屏幕位置）",
+    omniparser: "OmniParser"
+  };
+  let head = `检测到 ${total} 个元素（来源：${SOURCE_LABELS[source] ?? source}）`;
   if (truncated) head += `，仅列出前 ${elements.length} 个`;
   head += "。bbox 为截图内相对坐标（左上角为 0,0，单位与截图像素一致）。";
   if (geometry.displayWidth && geometry.displayHeight)

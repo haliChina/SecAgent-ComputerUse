@@ -1,11 +1,12 @@
 # SecAgent · Computer Use 插件
 
-让 SecAgent 像真人一样操控 Windows：**环境自检、元素侦察、按编号点击、截屏、移动、拖拽、滚动、输入文本、组合键**，并内置**设置控制台**。
+让 SecAgent 像真人一样操控 Windows：**环境自检、元素侦察、按编号点击、截屏、移动、拖拽、滚动、输入文本、组合键**，并内置**设置控制台**与**浏览器扩展桥**。
 
 - **v0.2 起**加入“元素地图”：系统列出可交互元素并编号，模型只选编号，坐标由系统给出，不再裸猜像素；
 - **v0.3 起**加入**设置控制台**：各种参数可调、**OmniParser 一键安装并启动**、**卡思考时温和提醒**；
 - **v0.4 起**加入 **doctor 自检**：安装后先运行，一次验证系统库 / 屏幕探针 / UIA / Python / OmniParser，失败项直接给修复建议；并支持 **HuggingFace 镜像与 pip 镜像**，国内一键安装不再卡死；
-- **v0.5 起**统一**坐标契约**（截图长边缩放 + 多显示器归一，所有 x,y 都是截图内相对坐标）、新增 **wait / cursor_position / windows / focus / launch / clipboard** 原语、**inspect(scope=desktop)** 可侦察任务栏与桌面。
+- **v0.5 起**统一**坐标契约**（截图长边缩放 + 多显示器归一，所有 x,y 都是截图内相对坐标）、新增 **wait / cursor_position / windows / focus / launch / clipboard** 原语、**inspect(scope=desktop)** 可侦察任务栏与桌面；
+- **v0.7 起**加入**浏览器扩展桥**：配对「SecAgent 浏览器桥」扩展（Chrome/Edge，本仓库 `extension/`）后，网页任务可 `inspect(backend="extension")` 直读 DOM——毫秒级、真实元素结构；另有 `tabs`（列/切标签页）与 `read_page`（读页面文本）工具；auto 模式在 UIA 稀疏时自动回退扩展（先于 OmniParser）。安装配对见 [docs/EXTENSION.md](docs/EXTENSION.md)。
 
 - 格式：SecAgent 自有插件（`secagent-plugin.json` + `main.mjs`）
 - 系统：动作仅 Windows（依赖 user32/gdi32 + PowerShell）；设置控制台在任意平台可打开
@@ -21,7 +22,9 @@
 | `computer-use__screenshot` | 截取整个屏幕（含多显示器），返回图片 + 坐标契约说明 |
 | `computer-use__wait` | 等待界面响应（50-10000ms），动作之间避免“点了没反应” |
 | `computer-use__cursor_position` | 读取指针位置，核对上一次点击是否落在预期位置 |
-| `computer-use__inspect` | 侦察可交互元素，返回编号清单；`annotate=true` 返回带编号框的标注图；`scope=desktop` 覆盖任务栏/桌面 |
+| `computer-use__inspect` | 侦察可交互元素，返回编号清单；`annotate=true` 返回带编号框的标注图；`scope=desktop` 覆盖任务栏/桌面；`backend="extension"` 走浏览器 DOM 直读（需配对扩展） |
+| `computer-use__tabs` | 浏览器标签页列表 / 切换（需配对扩展） |
+| `computer-use__read_page` | 读浏览器当前标签页可见文本（需配对扩展） |
 | `computer-use__windows` | 列出可见顶层窗口（标题 + 进程号） |
 | `computer-use__focus` | 按标题正则把焦点切到目标窗口 |
 | `computer-use__launch` | 启动应用 / 打开文件（detached） |
@@ -51,7 +54,7 @@
 4. 直接对话，例如：
    - “截屏看看我桌面上有什么”
    - “打开记事本，输入‘你好世界’，然后保存到桌面”
-   - “把浏览器里这个表单填一下”
+   - “把浏览器里这个表单填一下”（已配对扩展时 Agent 会自动走 DOM 直读，又快又准）
    - “打开设置，把元素上限调到 40”
 
 ## 国内用户：镜像加速（v0.5.7+）

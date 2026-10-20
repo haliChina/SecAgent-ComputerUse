@@ -237,6 +237,62 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
     refresh();
   }
 
+  // —— 浏览器扩展桥面板 ——
+  function extPanel(section) {
+    var box = el('div', 'svc');
+    var head = el('div', 'svc-head');
+    head.appendChild(el('strong', null, '扩展配对'));
+    var pill = el('span', 'pill not-installed', '读取中');
+    head.appendChild(pill);
+    box.appendChild(head);
+    var msg = el('div', 'svc-msg'); box.appendChild(msg);
+    var guide = el('div', 'svc-msg');
+    guide.style.cssText = 'white-space:pre-line';
+    guide.textContent = '配对步骤：\n1. 在 Chrome/Edge 打开 chrome://extensions，开启右上角「开发者模式」；\n2. 「加载已解压的扩展程序」，选择本插件目录下的 extension 文件夹；\n3. 点浏览器工具栏的 SecAgent 图标 → 打开配对页，填入下方端口与配对码；\n4. 状态变为「已连接」即完成，网页任务对 Agent 说「用浏览器扩展 inspect」即可。';
+    box.appendChild(guide);
+    var kv = el('div');
+    kv.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:6px 0';
+    var bPort = el('button', 'secondary', '复制端口');
+    var bToken = el('button', 'secondary', '复制配对码');
+    var bReset = el('button', 'danger', '重置配对码');
+    kv.appendChild(bPort); kv.appendChild(bToken); kv.appendChild(bReset);
+    box.appendChild(kv);
+    section.appendChild(box);
+
+    var cur = { port: 0, token: '' };
+    function apply(st) {
+      if (!st.running) {
+        pill.className = 'pill error'; pill.textContent = '未启动';
+        msg.textContent = '桥未启动：保存设置开启「启用浏览器扩展桥」后自动监听。';
+        return;
+      }
+      cur.port = st.port; cur.token = st.token;
+      if (st.connected) {
+        pill.className = 'pill running'; pill.textContent = '已连接';
+        msg.textContent = '已连接：' + (st.client && st.client.browser ? String(st.client.browser).slice(0, 80) : '浏览器扩展');
+      } else {
+        pill.className = 'pill stopped'; pill.textContent = '监听中·未配对';
+        msg.textContent = '端口 ' + st.port + ' 监听中，等待扩展连接（按上方步骤完成配对）。';
+      }
+    }
+    function refresh() { api('/api/ext/status').then(apply).catch(function () {}); }
+    function copy(text, label) {
+      if (!text) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(String(text)).catch(function () {});
+      }
+      msg.textContent = label + '已复制：' + text;
+    }
+    bPort.addEventListener('click', function () { copy(cur.port, '端口'); });
+    bToken.addEventListener('click', function () { copy(cur.token, '配对码'); });
+    bReset.addEventListener('click', function () {
+      if (!window.confirm('重置配对码将断开当前扩展，需在扩展配对页填入新配对码。继续？')) return;
+      post('/api/ext/reset').then(apply).catch(function (e) { msg.textContent = String(e.message || e); });
+    });
+    refresh();
+    setInterval(refresh, 5000);
+  }
+
   function setSaveStatus(text, ok) {
     var s = document.getElementById('saveStatus');
     s.textContent = text; s.className = 'save-status ' + (ok ? 'ok' : 'err');
@@ -256,6 +312,7 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
         });
         root.appendChild(card);
         if (group.id === 'omniparser') svcPanel(card);
+        if (group.id === 'extension') extPanel(card);
       });
     }).catch(function (e) {
       document.getElementById('groups').textContent = '加载失败：' + (e.message || e);
