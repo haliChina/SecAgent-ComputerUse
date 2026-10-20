@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>SecAgent 浏览器桥 · 配对</title>
+<style>
+  :root { --ink:#1c2330; --muted:#6b7280; --line:#e5e7eb; --primary:#2563eb; --ok:#16a34a; --err:#dc2626; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:28px 20px 60px; background:#f4f5f7; color:var(--ink);
+    font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { max-width:560px; margin:0 auto; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:14px/1.4 ui-monospace,Consolas,monospace; }
+  input:focus { outline:2px solid #bfdbfe; border-color:var(--primary); }
+  .row { display:flex; gap:10px; margin-top:14px; align-items:center; }
+  button { padding:8px 16px; border:none; border-radius:8px; background:var(--primary); color:#fff; font-size:14px; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--primary); border:1px solid var(--primary); }
+  .state { font-size:13px; margin-left:auto; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  ol { padding-left:20px; color:var(--muted); font-size:13px; }
+  code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SecAgent 浏览器桥</h1>
+  <div class="sub">与 SecAgent Computer Use 插件本机配对后，Agent 可直接读取本浏览器的页面元素与标签页（数据不出本机）。</div>
+
+  <div class="card">
+    <label for="port">端口（设置控制台「浏览器扩展桥」卡片里显示）</label>
+    <input id="port" inputmode="numeric" placeholder="例如 51324" />
+    <label for="token">配对码</label>
+    <input id="token" placeholder="在设置控制台点击「复制配对码」后粘贴到这里" />
+    <div class="row">
+      <button id="save">保存并连接</button>
+      <button id="reconnect" class="ghost">立即重连</button>
+      <span id="state" class="state">读取中…</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:600;margin-bottom:8px">配对步骤</div>
+    <ol>
+      <li>在 SecAgent 里打开 Computer Use 设置控制台（对 Agent 说「打开 computer-use 设置」）；</li>
+      <li>找到「浏览器扩展桥」卡片，复制<strong>端口</strong>与<strong>配对码</strong>；</li>
+      <li>回到本页填入并点「保存并连接」，状态显示「已连接」即完成；</li>
+      <li>之后对 Agent 说「用浏览器扩展检查这个页面」（inspect backend=extension）即可。</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:600;margin-bottom:8px">权限说明</div>
+    <div style="font-size:13px;color:var(--muted)">
+      本扩展仅连接 <code>127.0.0.1</code> 上的 SecAgent 插件；需要「标签页」与「脚本注入」权限来读取
+      页面元素，不读取历史、不修改设置、不向任何服务器发送数据。浏览器内部页面（<code>chrome://</code> 等）无法注入。
+    </div>
+  </div>
+</div>
+<script src="options.js"></script>
+</body>
+</html>

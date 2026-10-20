@@ -23,7 +23,8 @@ export async function runDoctor(deps = {}) {
     uiaRunner = undefined,
     uiaTimeoutMs = 8000,
     detectPython = null,
-    getOmniStatus = null
+    getOmniStatus = null,
+    getExtStatus = null
   } = deps;
 
   const checks = [];
@@ -125,7 +126,33 @@ export async function runDoctor(deps = {}) {
     }
   }
 
-  // 6) OmniParser 服务状态
+  // 6) 浏览器扩展桥状态
+  if (typeof getExtStatus === "function") {
+    try {
+      const st = getExtStatus() || {};
+      const ok = !!st.running;
+      push(
+        "extension",
+        "浏览器扩展桥",
+        ok,
+        st.running
+          ? st.connected
+            ? `监听 127.0.0.1:${st.port}，扩展已连接（${(st.client && st.client.browser) || "浏览器"}）`
+            : `监听 127.0.0.1:${st.port}，扩展未连接`
+          : "未启动（设置里「启用浏览器扩展桥」为关）",
+        st.running
+          ? st.connected
+            ? ""
+            : "按设置控制台「浏览器扩展桥」卡片的步骤安装并配对扩展（chrome://extensions 开发者模式 → 加载本插件目录的 extension 文件夹）。"
+          : "在设置控制台开启「启用浏览器扩展桥」；网页任务即可 DOM 直读。",
+        true
+      );
+    } catch (error) {
+      push("extension", "浏览器扩展桥", false, error?.message ?? String(error), "");
+    }
+  }
+
+  // 7) OmniParser 服务状态
   if (typeof getOmniStatus === "function") {
     try {
       const st = getOmniStatus() || {};

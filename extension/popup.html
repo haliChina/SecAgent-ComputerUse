@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  body { width:260px; margin:0; padding:12px; font:13px/1.5 -apple-system,"Segoe UI","PingFang SC",sans-serif; color:#1c2330; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#9ca3af; }
+  .dot.on { background:#16a34a; }
+  .title { font-weight:600; margin-bottom:6px; }
+  .state { color:#6b7280; font-size:12px; min-height:32px; }
+  button { margin-top:8px; width:100%; padding:6px 10px; border:1px solid #2563eb; border-radius:6px;
+    background:#fff; color:#2563eb; cursor:pointer; font-size:13px; }
+</style>
+</head>
+<body>
+  <div class="title"><span class="dot" id="dot"></span>SecAgent 浏览器桥</div>
+  <div class="state" id="state">读取中…</div>
+  <button id="open">打开配对页</button>
+<script src="popup.js"></script>
+</body>
+</html>

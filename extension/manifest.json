@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "SecAgent 浏览器桥",
+  "version": "1.0.0",
+  "description": "把浏览器 DOM 元素、标签页与页面文本提供给 SecAgent Computer Use 插件（本机配对，不收集任何数据）。",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SecAgent 浏览器桥"
+  },
+  "options_page": "options.html"
+}

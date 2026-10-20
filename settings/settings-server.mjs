@@ -30,6 +30,7 @@ export function createSettingsServer(options = {}) {
   const getConfig = options.getConfig || (() => ({}));
   const setConfig = options.setConfig || (() => {});
   const manager = options.manager || null;
+  const extBridge = options.extBridge || null;
   const pageHtml = options.pageHtml || "<!doctype html><meta charset=utf-8>console";
   const openBrowser = options.openBrowser || defaultOpenBrowser;
 
@@ -102,6 +103,17 @@ export function createSettingsServer(options = {}) {
     if (path === "/api/reset" && method === "POST") {
       setConfig({ ...DEFAULT_CONFIG });
       return json(res, 200, { config: { ...DEFAULT_CONFIG } });
+    }
+
+    // —— 浏览器扩展桥 ——
+    if (extBridge) {
+      if (path === "/api/ext/status" && method === "GET") {
+        return json(res, 200, extBridge.status());
+      }
+      if (path === "/api/ext/reset" && method === "POST") {
+        const token = extBridge.resetToken();
+        return json(res, 200, { ...extBridge.status(), token });
+      }
     }
 
     // —— OmniParser ——

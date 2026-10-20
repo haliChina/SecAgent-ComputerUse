@@ -37,7 +37,9 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/Omni
 | `computer-use__screenshot` | 无 | 截屏返回图片 + 坐标契约说明，观察整体 / 验证结果 |
 | `computer-use__wait` | `ms`（50-10000，默认 500） | 等待界面响应；连续动作之间建议 300-800ms |
 | `computer-use__cursor_position` | 无 | 读取指针位置（截图坐标 + 物理坐标），核对点击是否落点 |
-| `computer-use__inspect` | 可选 `backend`(auto/uia/omniparser)、`annotate`(布尔)、`clickableOnly`(布尔)、`scope`(foreground/desktop) | 返回元素清单文本；`annotate=true` 返回带编号框的标注图；`scope=desktop` 连任务栏/桌面图标一起侦察 |
+| `computer-use__inspect` | 可选 `backend`(auto/uia/extension/omniparser)、`annotate`(布尔)、`clickableOnly`(布尔)、`scope`(foreground/desktop)、`tabId`(extension 时) | 返回元素清单文本；`annotate=true` 返回带编号框的标注图；`scope=desktop` 连任务栏/桌面图标一起侦察；`backend="extension"` 浏览器 DOM 直读 |
+| `computer-use__tabs` | `action`(list/focus)，focus 需 `tabId` | 浏览器标签页列表/切换（需配对扩展） |
+| `computer-use__read_page` | 可选 `tabId`、`maxChars` | 读浏览器标签页可见文本（需配对扩展） |
 | `computer-use__windows` | 无 | 列出可见顶层窗口（标题 + 进程号） |
 | `computer-use__focus` | `title`（窗口标题正则） | 把焦点切到目标窗口，比盲点任务栏可靠 |
 | `computer-use__launch` | `command`，可选 `args` | 启动应用 / 打开文件（detached） |
@@ -62,7 +64,9 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/Omni
 
 - **UIA（默认）**：Windows UI Automation，免费精确，覆盖 Win32/WPF/WinForms/多数 Qt/Electron；
 - **UIA 范围**：`scope=foreground`（默认，只看前台窗口）/`scope=desktop`（桌面根节点，含任务栏、桌面图标、后台窗口，更慢元素更多）；
+- **浏览器扩展（推荐网页任务）**：已配对「SecAgent 浏览器桥」时，`inspect(backend="extension")` 直读页面 DOM——毫秒级、真实元素结构，远快于截图目测与视觉模型；用 `tabs` 切标签页、`read_page` 读全文。配对方法见 docs/EXTENSION.md（对用户说「按 EXTENSION.md 配对浏览器扩展」并引导完成）。点击仍走系统级 click(elementId)，坐标已自动换算；
 - **OmniParser（可选）**：当 UIA 元素过少（自绘界面、游戏、Canvas），在已启动 OmniParser HTTP 服务时用 `inspect(backend="omniparser")`；
+- auto 顺序：UIA → 元素稀疏时浏览器扩展（已连接）→ OmniParser；
 - UIA 已知盲区：自绘 UI、游戏、远程桌面内、管理员窗口（需提权或虚拟机）。
 
 ## 设置控制台与思考提醒
