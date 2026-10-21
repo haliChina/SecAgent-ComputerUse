@@ -42,14 +42,27 @@ test("桥：错误配对码被拒绝握手", async () => {
   }
 });
 
-test("桥：无配对码被拒绝握手", async () => {
+test("桥：无配对码连接（自动发现）不再拒绝握手，但未获准前不可用", async () => {
+  // 0.7.1 语义变更：无 token 连接走自动发现路径——握手放行（Origin 闸门
+  // 仍在），hello 后进入「待允许」，命令面保持关闭直到用户点「允许」。
   const bridge = createExtensionBridge();
   await bridge.start();
+  let client;
   try {
     const st = bridge.status();
-    const client = new WebSocket(`ws://127.0.0.1:${st.port}/`);
-    await assert.rejects(waitOpen(client));
+    client = new WebSocket(`ws://127.0.0.1:${st.port}/`);
+    await waitOpen(client);
+    client.send(JSON.stringify({ type: "hello", extId: "testauto123", extName: "T" }));
+    for (let i = 0; i < 100 && !bridge.status().pendingApproval; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const s = bridge.status();
+    assert.equal(s.connected, false, "未获准不应进入工作态");
+    assert.ok(s.pendingApproval, "应进入待允许状态");
+    assert.equal(s.pendingApproval.extId, "testauto123");
+    await assert.rejects(() => bridge.collectElements({}), /未连接|允许/);
   } finally {
+    client?.close();
     await bridge.stop();
   }
 });

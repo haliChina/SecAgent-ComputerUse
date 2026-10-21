@@ -241,21 +241,41 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
   function extPanel(section) {
     var box = el('div', 'svc');
     var head = el('div', 'svc-head');
-    head.appendChild(el('strong', null, '扩展配对'));
+    head.appendChild(el('strong', null, '扩展配对（装好扩展即自动发现）'));
     var pill = el('span', 'pill not-installed', '读取中');
     head.appendChild(pill);
     box.appendChild(head);
     var msg = el('div', 'svc-msg'); box.appendChild(msg);
+
+    // 待允许卡片：小白流程核心一步——点「允许」完成配对
+    var approveBox = el('div', 'svc');
+    approveBox.style.cssText = 'display:none;margin-top:8px';
+    var approveHead = el('div', 'svc-head');
+    approveHead.appendChild(el('strong', null, '待允许的浏览器扩展'));
+    approveBox.appendChild(approveHead);
+    var approveMsg = el('div', 'svc-msg'); approveBox.appendChild(approveMsg);
+    var approveBtns = el('div');
+    approveBtns.style.cssText = 'display:flex;gap:8px;margin-top:6px';
+    var bAllow = el('button', null, '允许');
+    bAllow.style.cssText = 'background:#16a34a;color:#fff;border:1px solid #16a34a';
+    var bDeny = el('button', 'secondary', '拒绝');
+    approveBtns.appendChild(bAllow); approveBtns.appendChild(bDeny);
+    approveBox.appendChild(approveBtns);
+    box.appendChild(approveBox);
+
     var guide = el('div', 'svc-msg');
     guide.style.cssText = 'white-space:pre-line';
-    guide.textContent = '配对步骤：\n1. 在 Chrome/Edge 打开 chrome://extensions，开启右上角「开发者模式」；\n2. 「加载已解压的扩展程序」，选择本插件目录下的 extension 文件夹；\n3. 点浏览器工具栏的 SecAgent 图标 → 打开配对页，填入下方端口与配对码；\n4. 状态变为「已连接」即完成，网页任务对 Agent 说「用浏览器扩展 inspect」即可。';
+    guide.textContent = '安装（只需三步）：\n1. 点下方「打开扩展管理页」，开启右上角「开发者模式」；\n2. 「加载已解压的扩展程序」，选插件目录下的 extension 文件夹；\n3. 装好后这里会出现「待允许」提示，点「允许」即完成。\n\n扩展装好后无需任何输入：自动发现、自动连接。手动配对码仅高级场景使用（见 docs/EXTENSION.md）。';
     box.appendChild(guide);
+
     var kv = el('div');
     kv.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:6px 0';
-    var bPort = el('button', 'secondary', '复制端口');
-    var bToken = el('button', 'secondary', '复制配对码');
+    var bOpen = el('button', null, '打开扩展管理页');
+    var bUntrust = el('button', 'secondary', '清除已信任列表');
+    var bPort = el('button', 'secondary', '复制端口（手动）');
+    var bToken = el('button', 'secondary', '复制配对码（手动）');
     var bReset = el('button', 'danger', '重置配对码');
-    kv.appendChild(bPort); kv.appendChild(bToken); kv.appendChild(bReset);
+    kv.appendChild(bOpen); kv.appendChild(bUntrust); kv.appendChild(bPort); kv.appendChild(bToken); kv.appendChild(bReset);
     box.appendChild(kv);
     section.appendChild(box);
 
@@ -264,15 +284,24 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
       if (!st.running) {
         pill.className = 'pill error'; pill.textContent = '未启动';
         msg.textContent = '桥未启动：保存设置开启「启用浏览器扩展桥」后自动监听。';
+        approveBox.style.display = 'none';
         return;
       }
       cur.port = st.port; cur.token = st.token;
-      if (st.connected) {
+      var p = st.pendingApproval;
+      if (p) {
+        approveBox.style.display = 'block';
+        approveMsg.textContent = '「' + (p.extName || '浏览器扩展') + '」请求连接（ID ' + String(p.extId || '').slice(0, 12) + '，' + (p.browser || '').slice(0, 60) + '）。点「允许」后即可用。';
+        pill.className = 'pill not-installed'; pill.textContent = '待允许';
+        msg.textContent = '检测到新装扩展的连接请求——确认是你刚装的点「允许」。';
+      } else if (st.connected) {
+        approveBox.style.display = 'none';
         pill.className = 'pill running'; pill.textContent = '已连接';
-        msg.textContent = '已连接：' + (st.client && st.client.browser ? String(st.client.browser).slice(0, 80) : '浏览器扩展');
+        msg.textContent = '已连接：' + (st.client && (st.client.extName || st.client.browser) ? String(st.client.extName || st.client.browser).slice(0, 80) : '浏览器扩展');
       } else {
-        pill.className = 'pill stopped'; pill.textContent = '监听中·未配对';
-        msg.textContent = '端口 ' + st.port + ' 监听中，等待扩展连接（按上方步骤完成配对）。';
+        approveBox.style.display = 'none';
+        pill.className = 'pill stopped'; pill.textContent = '监听中·等扩展';
+        msg.textContent = '端口 ' + st.port + ' 监听中。装好扩展后这里会自动出现连接请求。';
       }
     }
     function refresh() { api('/api/ext/status').then(apply).catch(function () {}); }
@@ -283,10 +312,23 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
       }
       msg.textContent = label + '已复制：' + text;
     }
+    bOpen.addEventListener('click', function () {
+      post('/api/ext/open-browser').catch(function (e) { msg.textContent = '打开失败，请手动访问 chrome://extensions/（' + (e.message || e) + '）'; });
+    });
+    bUntrust.addEventListener('click', function () {
+      if (!window.confirm('清除所有已信任扩展？清除后扩展需重新点「允许」。')) return;
+      post('/api/ext/untrust').then(apply).catch(function (e) { msg.textContent = String(e.message || e); });
+    });
+    bAllow.addEventListener('click', function () {
+      post('/api/ext/approve').then(apply).catch(function (e) { msg.textContent = String(e.message || e); });
+    });
+    bDeny.addEventListener('click', function () {
+      post('/api/ext/reject').then(apply).catch(function (e) { msg.textContent = String(e.message || e); });
+    });
     bPort.addEventListener('click', function () { copy(cur.port, '端口'); });
     bToken.addEventListener('click', function () { copy(cur.token, '配对码'); });
     bReset.addEventListener('click', function () {
-      if (!window.confirm('重置配对码将断开当前扩展，需在扩展配对页填入新配对码。继续？')) return;
+      if (!window.confirm('重置配对码将断开手动配对的扩展（自动发现配对不受影响）。继续？')) return;
       post('/api/ext/reset').then(apply).catch(function (e) { msg.textContent = String(e.message || e); });
     });
     refresh();
@@ -308,8 +350,9 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
         card.appendChild(el('h2', null, group.title));
         card.appendChild(el('p', 'gdesc', group.description));
         group.fields.forEach(function (field) {
-          renderField(card, field, config[field.key]);
-        });
+        if (field.hidden) return; // 内部字段（如已信任扩展列表）不在表单渲染
+        renderField(card, field, config[field.key]);
+      });
         root.appendChild(card);
         if (group.id === 'omniparser') svcPanel(card);
         if (group.id === 'extension') extPanel(card);

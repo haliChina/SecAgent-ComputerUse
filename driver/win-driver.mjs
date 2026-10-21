@@ -439,6 +439,10 @@ export class WindowsDriver {
         this.native.mouseEvent(b.up, 0);
       }
     });
+    // 落点视觉标记（#12）：默认开，设置可关；旧 native/测试桩无此方法时跳过。
+    if (this.#cfg().clickFlash !== false && typeof this.native.flashMarker === "function") {
+      try { this.native.flashMarker(abs.x, abs.y); } catch { /* 无碍 */ }
+    }
     return { clicked: { ...label, button, double } };
   }
 
@@ -486,16 +490,43 @@ export class WindowsDriver {
     });
   }
 
-  /** 输入文本（支持中文等 Unicode，逐 UTF-16 code unit 发送）。 */
+  /**
+   * 输入文本（支持中文等全部 Unicode，逐 UTF-16 code unit 发送，含代理对两半）。
+   *
+   * 0.7.1 根因修复（#12）：旧实现走 keybd_event，其 bScan 参数是 **8 位**，
+   * ≥0x100 的 code unit（全部中文）被截断成低 8 位 → 应用收到乱码。
+   * 现改走 SendInput（wScan 16 位），一次调用原子提交全部事件；
+   * 注入被拒（UIPI，目标为管理员窗口）时给出明确报错而不是静默丢字。
+   */
   async type(text) {
     if (typeof text !== "string") throw new Error("type 需要字符串");
     return await this.#withThreadDpi(() => {
+      if (!text.length) return { typed: { length: 0 }, mode: "none" };
+
+      if (typeof this.native.sendInputKeyboard === "function") {
+        const events = [];
+        for (let i = 0; i < text.length; i++) {
+          const code = text.charCodeAt(i);
+          events.push({ vk: 0, scan: code, flags: KEYEVENTF_UNICODE });
+          events.push({ vk: 0, scan: code, flags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP });
+        }
+        const accepted = this.native.sendInputKeyboard(events);
+        if (accepted < events.length)
+          throw new Error(
+            `SendInput 只接受了 ${accepted}/${events.length} 个事件——目标很可能是管理员权限窗口（UIPI 拦截）。` +
+              `请用管理员身份重启 SecAgent，或改在普通权限窗口输入。`
+          );
+        return { typed: { length: text.length }, mode: "sendinput" };
+      }
+
+      // 兼容路径：旧 native（测试桩/极端环境）退回 keybd_event。
+      // 注意该路径 ≥0x100 的字符会被 8 位 bScan 截断（历史已知限制）。
       for (let i = 0; i < text.length; i++) {
         const code = text.charCodeAt(i);
         this.native.keybdEvent(0, code, KEYEVENTF_UNICODE);
         this.native.keybdEvent(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
       }
-      return { typed: { length: text.length } };
+      return { typed: { length: text.length }, mode: "legacy" };
     });
   }
 
@@ -574,12 +605,19 @@ export function createKoffiNative(koffiImpl) {
   const GetCursorPos = user32.func("bool GetCursorPos(void* lpPoint)");
   const mouse_event = user32.func("void mouse_event(uint32 dwFlags, int dx, int dy, uint32 dwData, uintptr dwExtraInfo)");
   const keybd_event = user32.func("void keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr dwExtraInfo)");
+  const SendInput = user32.func("uint32 SendInput(uint32 cInputs, void* pInputs, int cbSize)");
   const MapVirtualKeyW = user32.func("uint32 MapVirtualKeyW(uint32 uCode, uint32 uMapType)");
+  // 点击落点标记（#12）：画环 → 300ms 后只失效标记矩形让其自然消失。
+  const InvalidateRect = user32.func("bool InvalidateRect(void* hWnd, void* lpRect, bool bErase)");
 
   const CreateCompatibleDC = gdi32.func("void* CreateCompatibleDC(void* hdc)");
   const DeleteDC = gdi32.func("int DeleteDC(void* hdc)");
   const CreateCompatibleBitmap = gdi32.func("void* CreateCompatibleBitmap(void* hdc, int cx, int cy)");
   const SelectObject = gdi32.func("void* SelectObject(void* hdc, void* h)");
+  const CreatePen = gdi32.func("void* CreatePen(int iPenStyle, int cWidth, uint32 color)");
+  const CreateSolidBrush = gdi32.func("void* CreateSolidBrush(uint32 color)");
+  const GetStockObject = gdi32.func("void* GetStockObject(int i)");
+  const Ellipse = gdi32.func("bool Ellipse(void* hdc, int left, int top, int right, int bottom)");
   const BitBlt = gdi32.func(
     "bool BitBlt(void* hdcDest, int x, int y, int w, int h, void* hdcSrc, int x1, int y1, uint32 rop)"
   );
@@ -603,6 +641,32 @@ export function createKoffiNative(koffiImpl) {
   });
 
   const PointStruct = koffi.struct("SA_POINT", { x: "int32", y: "int32" });
+  const RectStruct = koffi.struct("SA_RECT", { left: "int32", top: "int32", right: "int32", bottom: "int32" });
+
+  // INPUT（键盘形态，Win64）：显式排布到与 WinUser.h 完全一致的字节布局。
+  //   type@0(4) + 联合体对齐填充@4 + wVk@8 + wScan@10 + dwFlags@12 + time@16
+  //   + 填充@20 + dwExtraInfo@24 + 联合体尾部填充到 sizeof(INPUT)=40。
+  // 不用 koffi.union：MOUSEINPUT 是联合体最大成员（32B），显式 padding 更直
+  // 接可控，且可在封送测试里逐偏移验证（koffi.offsetof / decode 按偏移读）。
+  const InputStruct = koffi.struct("SA_INPUT", {
+    type: "uint32",
+    pad0: "uint32",
+    wVk: "uint16",
+    wScan: "uint16",
+    dwFlags: "uint32",
+    time: "uint32",
+    pad1: "uint32",
+    dwExtraInfo: "uintptr",
+    tail: "uint32"
+  });
+  // SendInput 数组类型按长度缓存（koffi.array 是匿名类型，重复创建无注册
+  // 冲突，但避免高频 type() 时反复建类型）。
+  const inputArrayTypeCache = new Map();
+  const inputArrayTypes = (n) => {
+    let t = inputArrayTypeCache.get(n);
+    if (!t) { t = koffi.array(InputStruct, n); inputArrayTypeCache.set(n, t); }
+    return t;
+  };
 
   let SetThreadDpiAwarenessContext = null;
   try {
@@ -665,7 +729,86 @@ export function createKoffiNative(koffiImpl) {
     },
     mouseEvent: (flags, data) => mouse_event(flags, 0, 0, data, 0),
     keybdEvent: (vk, scan, flags) => keybd_event(vk, scan, flags, 0),
-    mapVirtualKey: (vk) => MapVirtualKeyW(vk, 0)
+    mapVirtualKey: (vk) => MapVirtualKeyW(vk, 0),
+    /**
+     * 批量注入键盘事件（SendInput，一次调用原子提交）。
+     * 0.7.1 起用于 type 的 Unicode 输入：keybd_event 的 bScan 只有 8 位，
+     * 中文等 ≥0x100 的 code unit 被截断成乱码；SendInput 的 wScan 是 16 位。
+     * 封送：koffi.array(InputStruct, n) 匿名数组类型按长度缓存，encode 一次
+     * 写整段，decode 按偏移回读已在 koffi-marshaling 测试逐字节验证。
+     * @param {{vk:number,scan:number,flags:number}[]} events
+     * @returns {number} 实际接受的事件数（<events.length 说明被 UIPI 拦截，
+     *   典型场景：目标是管理员权限窗口而插件是普通权限）
+     */
+    sendInputKeyboard: (events) => {
+      if (!events.length) return 0;
+      const n = events.length;
+      const arrType = inputArrayTypes(n);
+      const ptr = koffi.alloc(arrType, 1);
+      koffi.encode(ptr, arrType, events.map((e) => ({
+        type: 1 /* INPUT_KEYBOARD */,
+        pad0: 0,
+        wVk: e.vk,
+        wScan: e.scan,
+        dwFlags: e.flags,
+        time: 0,
+        pad1: 0,
+        dwExtraInfo: 0,
+        tail: 0
+      })));
+      return SendInput(n, ptr, koffi.sizeof(InputStruct));
+    },
+    /**
+     * 点击落点视觉标记（#12：让用户肉眼可循 Agent 的操作轨迹）。
+     * 在屏幕 DC 画红环+红点 → 300ms 后只失效标记矩形（目标区域自然重绘
+     * 抹掉标记）。全程 best-effort：任何失败静默（绝不影响点击本身）。
+     * @param {number} x 物理绝对坐标
+     * @param {number} y
+     * @param {number} [radius=12] 环半径（物理像素）
+     */
+    flashMarker: (x, y, radius = 12) => {
+      const PS_SOLID = 0;
+      const NULL_BRUSH = 5;
+      const RED = 0x000000ff; // COLORREF 0x00BBGGRR
+      let dc = null, pen = null, brush = null, oldPen = null, oldBrush = null;
+      try {
+        dc = GetDC(null);
+        if (!dc) return;
+        const r = Math.max(4, radius | 0);
+        // 环（空刷只描边）
+        pen = CreatePen(PS_SOLID, 3, RED);
+        if (pen) {
+          oldPen = SelectObject(dc, pen);
+          const nb = GetStockObject(NULL_BRUSH);
+          if (nb) oldBrush = SelectObject(dc, nb);
+          Ellipse(dc, x - r, y - r, x + r, y + r);
+          if (nb && oldBrush) SelectObject(dc, oldBrush);
+        }
+        // 中心点（实心红）
+        brush = CreateSolidBrush(RED);
+        if (brush) {
+          const ob = SelectObject(dc, brush);
+          Ellipse(dc, x - 3, y - 3, x + 3, y + 3);
+          if (ob) SelectObject(dc, ob);
+        }
+      } catch { /* 标记失败无碍 */ } finally {
+        try { if (oldPen) SelectObject(dc, oldPen); } catch { /* ignore */ }
+        try { if (pen) DeleteObject(pen); } catch { /* ignore */ }
+        try { if (brush) DeleteObject(brush); } catch { /* ignore */ }
+        try { if (dc) ReleaseDC(null, dc); } catch { /* ignore */ }
+      }
+      // 300ms 后失效标记矩形：底层窗口收到 WM_PAINT 自然抹掉标记，
+      // 不整屏失效（避免闪烁）。
+      const t = setTimeout(() => {
+        try {
+          const pad = (radius | 0) + 8;
+          const rect = koffi.alloc(RectStruct, 1);
+          koffi.encode(rect, RectStruct, { left: x - pad, top: y - pad, right: x + pad, bottom: y + pad });
+          InvalidateRect(null, rect, true);
+        } catch { /* ignore */ }
+      }, 300);
+      if (t.unref) t.unref();
+    }
   };
   cachedKoffiNative = native;
   return native;
