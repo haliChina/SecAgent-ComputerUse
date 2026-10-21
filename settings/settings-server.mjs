@@ -114,6 +114,23 @@ export function createSettingsServer(options = {}) {
         const token = extBridge.resetToken();
         return json(res, 200, { ...extBridge.status(), token });
       }
+      if (path === "/api/ext/approve" && method === "POST") {
+        return json(res, 200, extBridge.approvePending());
+      }
+      if (path === "/api/ext/reject" && method === "POST") {
+        return json(res, 200, extBridge.rejectPending());
+      }
+      if (path === "/api/ext/untrust" && method === "POST") {
+        extBridge.clearTrusted();
+        return json(res, 200, extBridge.status());
+      }
+      // 小白引导：直接打开浏览器的扩展管理页（Chrome/Edge 都吃 chrome:// 协议）。
+      if (path === "/api/ext/open-browser" && method === "POST") {
+        try {
+          openBrowser("chrome://extensions/");
+        } catch { /* 打不开就返回 URL 让用户自己点 */ }
+        return json(res, 200, { opened: true, url: "chrome://extensions/" });
+      }
     }
 
     // —— OmniParser ——

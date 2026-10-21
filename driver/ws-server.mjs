@@ -196,7 +196,7 @@ export function createWsServer(opts) {
     );
     socket.setNoDelay(true);
 
-    const conn = { socket, alive: true, meta: {} };
+    const conn = { socket, alive: true, meta: {}, req };
     const parser = createFrameParser();
     socket.on("data", (chunk) => {
       for (const ev of parser.push(chunk)) {
@@ -234,13 +234,34 @@ export function createWsServer(opts) {
 
   let boundPort = 0;
   return {
-    start() {
-      return new Promise((resolve) => {
-        server.listen(0, "127.0.0.1", () => {
-          boundPort = server.address().port;
-          resolve({ port: boundPort });
+    /**
+     * 启动监听：优先依次尝试 preferredPorts（小白自动发现固定端口段），
+     * 全部被占或列表为空时回退随机端口（0）。
+     * @param {number[]} [preferredPorts=[]]
+     */
+    start(preferredPorts = []) {
+      const tryListen = (port) =>
+        new Promise((resolve) => {
+          const onError = () => {
+            server.off("error", onError);
+            resolve(null);
+          };
+          server.once("error", onError);
+          server.listen(port, "127.0.0.1", () => {
+            server.off("error", onError);
+            boundPort = server.address().port;
+            resolve(boundPort);
+          });
         });
-      });
+      return (async () => {
+        for (const p of preferredPorts) {
+          const got = await tryListen(p);
+          if (got) return { port: got };
+        }
+        const got = await tryListen(0);
+        if (!got) throw new Error("WebSocket 服务启动失败（随机端口也绑定失败）");
+        return { port: got };
+      })();
     },
     stop() {
       return new Promise((resolve) => {

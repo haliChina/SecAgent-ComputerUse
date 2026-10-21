@@ -3,7 +3,7 @@
 import { WindowsDriver } from "./driver/win-driver.mjs";
 import { createKoffiNative } from "./driver/win-driver.mjs";
 import { runDoctor, formatDoctorReport } from "./driver/doctor.mjs";
-import { listWindows, focusWindow, readClipboard, writeClipboard, launchApp } from "./driver/system-ops.mjs";
+import { listWindows, focusWindow, readClipboard, writeClipboard, launchApp, listApps, matchApps } from "./driver/system-ops.mjs";
 import { mergeConfig, describeSettings, DEFAULT_CONFIG } from "./settings/config-schema.mjs";
 import { createSettingsServer } from "./settings/settings-server.mjs";
 import { CONSOLE_HTML } from "./settings/console-page.mjs";
@@ -36,7 +36,7 @@ const STATIC_RULES = `## 电脑操作规则（Computer Use）
 - 标准节奏：screenshot 观察整体 → inspect 拿到元素编号 → click(elementId) 或 type/key → 需要时 wait 等待界面响应 → 再 screenshot 验证，逐步推进。
 - 需要视觉核对时用 inspect(annotate=true) 查看带编号框的标注图；界面一旦变化，元素地图即过期，需重新 inspect。
 - 需要输入文字时，先按 elementId 点击输入框使其聚焦，再 type；需要快捷键时用 key。
-- 要打开别的程序：优先 launch(command) 或 focus(title 窗口标题正则)，不要靠盲点任务栏图标。
+- 要打开别的程序：**直接 launch(应用名)**（如 launch("腾讯视频")——找不到可执行会自动搜桌面/开始菜单快捷方式；不确定名称先 apps(query) 查）；或 focus(title 窗口标题正则) 切换已开的窗口，不要靠盲点任务栏图标。
 - 若 UIA 元素过少（自绘界面、游戏、Canvas），在已启用 OmniParser 时用 inspect(backend="omniparser")；要看任务栏/桌面图标用 inspect(scope="desktop")。
 - 浏览器网页任务：已配对「SecAgent 浏览器桥」扩展时，用 inspect(backend="extension") 直读页面 DOM（毫秒级、真实元素结构，远快于截图目测）；配合 tabs 切换标签页、read_page 读页面全文。扩展未配对时正常走 auto（UIA/OmniParser）。
 - 每个方案最多自我反驳一轮，禁止在两个位置或方案间反复横跳；连续 2 次动作无进展就换思路或向用户说明卡点。
@@ -60,10 +60,10 @@ export async function activate(api) {
 
   const initial = readConfig();
 
-  // 浏览器扩展桥（设置可关；仅 127.0.0.1 + 配对码）。
+  // 浏览器扩展桥（设置可关；仅 127.0.0.1；0.7.1 起支持小白自动发现配对）。
   const extBridge = createExtensionBridge({
     getConfig: readConfig,
-    isEnabled: () => readConfig().extBridgeEnabled !== false
+    setConfig: persistConfig
   });
 
   // driver 通过 configProvider 动态读取设置（含 OmniParser 开关 / 扩展桥）。
@@ -113,6 +113,13 @@ export async function activate(api) {
           await extBridge.setEnabled(true).catch(() => {});
           return { ...DEFAULT_CONFIG };
         case "ext-status":
+          return extBridge.status();
+        case "ext-approve":
+          return extBridge.approvePending();
+        case "ext-reject":
+          return extBridge.rejectPending();
+        case "ext-untrust":
+          extBridge.clearTrusted();
           return extBridge.status();
         case "ext-reset":
           extBridge.resetToken();
@@ -371,14 +378,14 @@ export async function activate(api) {
     {
       name: "launch",
       description:
-        "启动应用（detached，不阻塞）。仅支持可执行文件（如 notepad、cmd、explorer）；打开文档/文件夹可用 explorer <路径>。例如 launch('notepad')。启动后建议 wait 再 screenshot。",
+        "启动应用（detached，不阻塞）。**直接写应用名即可**（如 launch('腾讯视频')、launch('网易云音乐')）：找不到可执行时会自动搜索桌面与开始菜单的快捷方式并启动。也可启动可执行文件/打开网址（launch('msedge', ['https://…'])）。启动后建议 wait 再 screenshot。",
       inputSchema: {
         type: "object",
         additionalProperties: false,
         required: ["command"],
         properties: {
-          command: { type: "string", description: "可执行文件名或文件路径" },
-          args: { type: "array", items: { type: "string" }, description: "可选参数" }
+          command: { type: "string", description: "应用名（如「腾讯视频」）或可执行文件名/路径" },
+          args: { type: "array", items: { type: "string" }, description: "可选参数（仅可执行文件路径时有效）" }
         }
       },
       hidden: false
@@ -389,6 +396,32 @@ export async function activate(api) {
       if (a.args != null && !Array.isArray(a.args))
         throw new Error("launch 的 args 必须是字符串数组");
       return launchApp({ command: a.command, args: a.args ?? [] });
+    })
+  );
+
+  // 3.2) 已安装应用搜索（桌面/开始菜单快捷方式索引）
+  api.registerTool(
+    {
+      name: "apps",
+      description:
+        "按名称搜索本机已安装的应用（桌面 + 开始菜单快捷方式索引，缓存 5 分钟）。用户说「打开腾讯视频」但不确定确切名称时，先用本工具查（如 apps(query=\"腾讯\")），拿到准确名称后 launch。不传 query 列出全部（可能较多）。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          query: { type: "string", description: "名称关键词（支持中文，如「腾讯」「steam」）" },
+          force: { type: "boolean", description: "true 时重建索引（新装应用后用）" }
+        }
+      },
+      hidden: false
+    },
+    guarded("apps", async (a) => {
+      const list = await listApps({ force: a.force === true });
+      if (a.query != null && String(a.query).trim()) {
+        const hits = matchApps(list, String(a.query));
+        return { query: String(a.query), count: hits.length, apps: hits.slice(0, 60).map((x) => ({ name: x.name, file: x.file })) };
+      }
+      return { count: list.length, apps: list.slice(0, 200).map((x) => ({ name: x.name, file: x.file })) };
     })
   );
 

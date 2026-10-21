@@ -6,7 +6,10 @@ import {
   focusWindow,
   readClipboard,
   writeClipboard,
-  launchApp
+  launchApp,
+  listApps,
+  matchApps,
+  resetAppsCacheForTest
 } from "../driver/system-ops.mjs";
 
 // runner 收到的永远是 UTF-16LE base64 脚本；测试里解码回来断言。
@@ -85,6 +88,112 @@ test("writeClipboard：文本按码点转成 PowerShell 字符数组，避免转
   assert.doesNotMatch(script, /a'b"中/); // 原文不得直接进入脚本
 });
 
+test("launchApp：spawn 失败（ENOENT）且索引无命中 → 报错附 apps 引导", async () => {
+  const { EventEmitter } = await import("node:events");
+  const child = new EventEmitter();
+  const runner = async () => ({ stdout: JSON.stringify([{ name: "记事本", file: "C:/x/记事本.lnk" }]) });
+  const pending = launchApp({ command: "no-such-app.exe", spawnImpl: () => child, runner });
+  child.emit("error", Object.assign(new Error("spawn no-such-app.exe ENOENT"), { code: "ENOENT" }));
+  await assert.rejects(pending, (error) => {
+    assert.match(error.message, /启动失败（no-such-app\.exe）/);
+    assert.match(error.message, /找不到该程序/);
+    assert.match(error.message, /已搜索桌面与开始菜单的快捷方式/);
+    assert.match(error.message, /apps 工具/);
+    return true;
+  });
+});
+
+test("launchApp：spawn 失败自动回退快捷方式（唯一命中 start .lnk）", async () => {
+  const { EventEmitter } = await import("node:events");
+  const spawns = [];
+  const child = new EventEmitter();
+  const shortcutChild = { pid: 999, unref: () => {} };
+  const runner = async () => ({
+    stdout: JSON.stringify([
+      { name: "腾讯视频", file: "C:/Users/Public/Desktop/腾讯视频.lnk" },
+      { name: "记事本", file: "C:/x/记事本.lnk" }
+    ])
+  });
+  const pending = launchApp({
+    command: "腾讯视频",
+    spawnImpl: (cmd, argv, opts) => {
+      spawns.push([cmd, argv, opts]);
+      if (spawns.length === 1) return child; // 首次 spawn 失败
+      return shortcutChild; // 回退 start
+    },
+    runner
+  });
+  child.emit("error", Object.assign(new Error("spawn 腾讯视频 ENOENT"), { code: "ENOENT" }));
+  const res = await pending;
+  assert.equal(res.via, "shortcut");
+  assert.equal(res.launched, "腾讯视频");
+  assert.equal(res.pid, 999);
+  assert.equal(spawns.length, 2);
+  assert.equal(spawns[1][0], "cmd");
+  assert.equal(spawns[1][1][2], ""); // start 的标题占位
+  assert.equal(spawns[1][1][3], "C:/Users/Public/Desktop/腾讯视频.lnk");
+});
+
+test("launchApp：索引多命中 → 报错附候选列表", async () => {
+  const { EventEmitter } = await import("node:events");
+  const child = new EventEmitter();
+  const runner = async () => ({
+    stdout: JSON.stringify([
+      { name: "腾讯视频", file: "C:/a.lnk" },
+      { name: "腾讯会议", file: "C:/b.lnk" }
+    ])
+  });
+  const pending = launchApp({ command: "腾讯", spawnImpl: () => child, runner });
+  child.emit("error", Object.assign(new Error("spawn 腾讯 ENOENT"), { code: "ENOENT" }));
+  await assert.rejects(pending, (error) => {
+    assert.match(error.message, /匹配到 2 个应用/);
+    assert.match(error.message, /腾讯视频 \| 腾讯会议/);
+    return true;
+  });
+});
+
+test("launchApp：spawn 永不确认（挂死）超时后回退快捷方式", async () => {
+  const { EventEmitter } = await import("node:events");
+  const child = new EventEmitter(); // 永不发事件：模拟 CreateProcess 被杀软拖死
+  const runner = async () => ({ stdout: JSON.stringify([{ name: "steam", file: "C:/s.lnk" }]) });
+  const res = await launchApp({
+    command: "steam",
+    spawnImpl: () => child,
+    runner,
+    timeoutMs: 60
+  });
+  assert.equal(res.via, "shortcut");
+  assert.equal(res.launched, "steam");
+});
+
+test("matchApps：归一化与精确优先", async () => {
+  const apps = [
+    { name: "腾讯视频", file: "a" },
+    { name: "Tencent Video", file: "b" },
+    { name: "腾讯会议", file: "c" }
+  ];
+  assert.equal(matchApps(apps, "腾讯视频").length, 1);
+  assert.equal(matchApps(apps, "腾讯").length, 2);
+  assert.equal(matchApps(apps, "tencent video")[0].file, "b"); // 小写归一
+  assert.equal(matchApps(apps, "").length, 0);
+});
+
+test("listApps：runner 注入解析 + 卸载项过滤 + 不缓存", async () => {
+  resetAppsCacheForTest();
+  const runner = async () => ({
+    stdout: JSON.stringify([
+      { name: "应用A", file: "C:/a.lnk" },
+      { name: "Uninstall 应用A", file: "C:/u.lnk" }
+    ])
+  });
+  const list = await listApps({ runner });
+  assert.equal(list.length, 1);
+  assert.equal(list[0].name, "应用A");
+  // 单对象（非数组）JSON 也兼容
+  const runner2 = async () => ({ stdout: JSON.stringify({ name: "单应用", file: "C:/one.url" }) });
+  assert.equal((await listApps({ runner: runner2 })).length, 1);
+});
+
 test("launchApp：detached 启动并 unref，命令为空报错", async () => {
   const seen = {};
   const fakeChild = { pid: 4321, unref: () => { seen.unrefed = true; } };
@@ -98,22 +207,10 @@ test("launchApp：detached 启动并 unref，命令为空报错", async () => {
   });
   assert.equal(res.launched, "notepad");
   assert.equal(res.pid, 4321);
+  assert.equal(res.via, "spawn");
   assert.equal(seen.opts.detached, true);
   assert.equal(seen.unrefed, true);
-  assert.throws(() => launchApp({ command: "  ", spawnImpl: () => fakeChild }), /launch 需要 command/);
-});
-
-test("launchApp：spawn 失败（ENOENT）转为友好报错，不产生未捕获异常", async () => {
-  const { EventEmitter } = await import("node:events");
-  const child = new EventEmitter();
-  const pending = launchApp({ command: "no-such-app.exe", spawnImpl: () => child });
-  child.emit("error", Object.assign(new Error("spawn no-such-app.exe ENOENT"), { code: "ENOENT" }));
-  await assert.rejects(pending, (error) => {
-    assert.match(error.message, /启动失败（no-such-app\.exe）/);
-    assert.match(error.message, /找不到该程序/);
-    assert.match(error.message, /只能启动可执行文件/);
-    return true;
-  });
+  await assert.rejects(() => launchApp({ command: "  ", spawnImpl: () => fakeChild }), /launch 需要 command/);
 });
 
 test("launchApp：spawn 成功事件后 resolve 并 unref", async () => {

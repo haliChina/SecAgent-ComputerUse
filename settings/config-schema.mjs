@@ -50,6 +50,9 @@ export const SETTING_FIELDS = [
     label: "扩展元素数量上限", hint: "DOM 直读很快，可比 UIA 略多；超过后截断。", effect: "immediate" },
   { key: "extReadMaxChars", group: "extension", type: "number", default: 12000, min: 500, max: 200000, step: 500,
     label: "read_page 文本上限（字符）", hint: "读页面可见文本的截断长度。", effect: "immediate" },
+  { key: "extTrustedIds", group: "extension", type: "string", default: "",
+    label: "已信任扩展", hidden: true,
+    hint: "自动发现配对时用户点过「允许」的扩展 ID（逗号分隔）。", effect: "immediate" },
 
   // —— OmniParser ——
   { key: "omniEnabled", group: "omniparser", type: "boolean", default: false,
@@ -84,6 +87,9 @@ export const SETTING_FIELDS = [
     label: "提醒文案", effect: "immediate" },
 
   // —— 动作 ——
+  { key: "clickFlash", group: "actions", type: "boolean", default: true,
+    label: "点击落点视觉标记",
+    hint: "Agent 点击处闪红圈，方便肉眼循迹、区分人与 Agent 操作。", effect: "immediate" },
   { key: "autoInspect", group: "actions", type: "boolean", default: true,
     label: "点击前先 inspect 定位", effect: "guidance" },
   { key: "verifyAfterAction", group: "actions", type: "boolean", default: true,

@@ -146,54 +146,230 @@ Write-Output (ConvertTo-Json ([ordered]@{ ok = $true; length = ${String(text ?? 
 
 /**
  * 启动应用（detached，不阻塞宿主）。
- * 注意：仅支持可执行文件（PE）。spawn 失败（如 ENOENT）以异步 'error' 事件到达，
- * 未监听就是 uncaughtException、可能带崩宿主，因此返回 Promise 并转为友好报错。
- * @param {{command:string, args?:string[], spawnImpl?:Function}} opts
- * @returns {Promise<{launched:string, args:string[], pid:number|null}>}
+ *
+ * 0.7.1 起 launch 是一条完整的「应用启动链」（修 #12 会话实锤的翻车点：
+ * launch("msedge") 因 PATH/CreateProcess 问题永久挂起，而桌面明明有
+ * 目标应用快捷方式）：
+ *   1. 直接 spawn 可执行（现状，PATH/App Paths 可解析时最干净）；
+ *   2. 失败（ENOENT）或超时（默认 15s 未确认，杀软钩子/慢 CreateProcess）
+ *      → 自动回退**快捷方式索引**：桌面 + 两处开始菜单的 .lnk/.url 按名称
+ *      归一化匹配（如「腾讯视频」），唯一命中即 start 该快捷方式（自带
+ *      参数/工作目录/管理员标记）；多命中则报错附候选；
+ *   3. 索引也无命中 → 报错附 apps 工具用法。
+ * 注意：仅支持可执行文件（PE）。spawn 失败以异步 'error' 事件到达，
+ * 未监听就是 uncaughtException，因此全部转为友好报错。
+ * @param {{command:string, args?:string[], spawnImpl?:Function,
+ *          runner?:Function, timeoutMs?:number}} opts
+ * @returns {Promise<{launched:string, args?:string[], pid?:number|null, via?:"spawn"|"shortcut"}>}
  */
-export function launchApp({ command, args = [], spawnImpl } = {}) {
+export async function launchApp({ command, args = [], spawnImpl, runner, timeoutMs = 15000 } = {}) {
   const target = String(command ?? "").trim();
-  if (!target) throw new Error("launch 需要 command（可执行文件名或文件路径）");
+  if (!target) throw new Error("launch 需要 command（可执行文件名或应用名，如 notepad、腾讯视频）");
   // 注意：局部名不能叫 spawn——会遮蔽顶部 import 并落入自身 TDZ，
   // “const spawn = spawnImpl ?? spawn” 在生产路径（不注入 spawnImpl）必抛
   // “Cannot access 'spawn' before initialization”（注入 fake 的测试因 ?? 短路而全绿）。
   const spawnFn = spawnImpl ?? defaultSpawn;
-  let child;
+
+  const trySpawn = () =>
+    new Promise((resolve, reject) => {
+      let child;
+      try {
+        child = spawnFn(target, args, { detached: true, stdio: "ignore" });
+      } catch (error) {
+        reject(new Error(launchErrorMessage(target, error)));
+        return;
+      }
+      // 兼容无事件接口的注入实现（测试）
+      if (!child || typeof child.once !== "function") {
+        child?.unref?.();
+        resolve({ launched: target, args, pid: child?.pid ?? null, via: "spawn" });
+        return;
+      }
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        // 超时：进程创建可能被杀软/系统拖死（实锤场景）。不再等事件，
+        // 交给调用方走快捷方式回退（单实例应用自行去重，双开风险小）。
+        reject(new LaunchTimeoutError(target, timeoutMs));
+      }, timeoutMs);
+      if (timer.unref) timer.unref();
+      child.once("spawn", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.unref?.();
+        resolve({ launched: target, args, pid: child?.pid ?? null, via: "spawn" });
+      });
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new LaunchSpawnError(target, error));
+      });
+    });
+
+  let spawnResult = null;
+  let spawnError = null;
   try {
-    child = spawnFn(target, args, { detached: true, stdio: "ignore" });
+    spawnResult = await trySpawn();
   } catch (error) {
-    return Promise.reject(new Error(launchErrorMessage(target, error)));
+    spawnError = error;
   }
-  // 兼容无事件接口的注入实现（测试）
-  if (!child || typeof child.once !== "function") {
-    child?.unref?.();
-    return Promise.resolve({ launched: target, args, pid: child?.pid ?? null });
+  if (spawnResult) return spawnResult;
+
+  // —— 快捷方式回退：应用名匹配（「找不到用户想启动的应用」的解药）。
+  let apps = [];
+  try {
+    apps = await listApps({ runner });
+  } catch { /* 索引失败保留原始报错 */ }
+  const matched = matchApps(apps, target);
+  if (matched.length === 1) {
+    const hit = matched[0];
+    const launchViaShortcut = () =>
+      new Promise((resolve, reject) => {
+        let child;
+        try {
+          // start 的标题参数留空串，路径含空格/中文由数组参数安全转义。
+          child = spawnFn("cmd", ["/c", "start", "", hit.file], { detached: true, stdio: "ignore" });
+        } catch (error) {
+          reject(new Error(launchErrorMessage(hit.file, error)));
+          return;
+        }
+        if (!child || typeof child.once !== "function") {
+          child?.unref?.();
+          resolve({ launched: hit.name, via: "shortcut", pid: child?.pid ?? null });
+          return;
+        }
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          resolve({ launched: hit.name, via: "shortcut", pid: null }); // start 异步成功即不阻塞
+        }, 8000);
+        if (timer.unref) timer.unref();
+        child.once("spawn", () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          child.unref?.();
+          resolve({ launched: hit.name, via: "shortcut", pid: child.pid ?? null });
+        });
+        child.once("error", (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(launchErrorMessage(hit.name, error)));
+        });
+      });
+    return await launchViaShortcut();
   }
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    child.once("spawn", () => {
-      if (settled) return;
-      settled = true;
-      child.unref?.();
-      resolve({ launched: target, args, pid: child.pid ?? null });
-    });
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(new Error(launchErrorMessage(target, error)));
-    });
-  });
+  if (matched.length > 1) {
+    const list = matched.slice(0, 10).map((a) => a.name).join(" | ");
+    throw new Error(
+      `「${target}」匹配到 ${matched.length} 个应用：${list}。请用更精确的名称重试 launch。`
+    );
+  }
+
+  // 索引也无命中：把两层原因都讲清楚。
+  const timeoutNote = spawnError instanceof LaunchTimeoutError
+    ? `启动确认超时（${timeoutMs}ms，可能被安全软件拖慢，或进程已在创建中）。`
+    : "";
+  throw new Error(
+    `启动失败（${target}）：${timeoutNote}${timeoutNote ? " " : ""}${spawnError instanceof LaunchSpawnError ? spawnError.hint : (spawnError?.message ?? String(spawnError))}。` +
+    `已搜索桌面与开始菜单的快捷方式（共 ${apps.length} 个）未找到「${target}」。` +
+    `建议：先用 apps 工具按名称搜索已安装应用（如 apps(query="腾讯")），再用 launch 启动；打开网址可直接 launch("msedge", ["https://…"]) 或 launch("cmd", ["/c", "start", "", "https://…"])。`
+  );
+}
+
+/** 内部错误类型：区分「确认超时」与「spawn 失败」，用于回退与文案。 */
+class LaunchTimeoutError extends Error {
+  constructor(target, ms) {
+    super(`launch 超时（${target}，${ms}ms）`);
+    this.name = "LaunchTimeoutError";
+  }
+}
+class LaunchSpawnError extends Error {
+  constructor(target, cause) {
+    super(`launch 失败（${target}）：${cause?.message ?? cause}`);
+    this.name = "LaunchSpawnError";
+    this.code = cause?.code;
+    this.hint = launchHint(cause);
+  }
+}
+
+function launchHint(error) {
+  const code = error?.code;
+  if (code === "ENOENT")
+    return "找不到该程序（不在 PATH）。可执行文件请写完整路径或名称；应用直接写名字即可走快捷方式回退。";
+  if (code === "EACCES") return "没有执行权限。";
+  return error?.message ?? String(error);
 }
 
 function launchErrorMessage(target, error) {
-  const code = error?.code;
-  let hint;
-  if (code === "ENOENT") {
-    hint = "找不到该程序。请确认名称或路径正确；注意 launch 只能启动可执行文件（如 notepad、cmd、explorer），打开文档/文件夹请改用 explorer <路径> 或先启动对应程序。";
-  } else if (code === "EACCES") {
-    hint = "没有执行权限。";
-  } else {
-    hint = error?.message ?? String(error);
+  return `启动失败（${target}）：${launchHint(error)}`;
+}
+
+// ---------------------------------------------------------------------------
+// 已安装应用索引（桌面 + 开始菜单快捷方式）。
+// ---------------------------------------------------------------------------
+
+const APPS_TTL_MS = 5 * 60 * 1000;
+let appsCache = null; // { value: Array, at: number }
+
+/**
+ * 列出可启动应用（快捷方式）：桌面 + 两个开始菜单目录的 .lnk/.url 文件名。
+ * 结果缓存 5 分钟（开始菜单递归扫描一次 ~1s）；注入 runner 时不缓存（测试确定性）。
+ * @returns {Promise<Array<{name:string,file:string}>>}
+ */
+export async function listApps({ runner, timeout = 20000, force = false } = {}) {
+  if (!runner && !force && appsCache && Date.now() - appsCache.at < APPS_TTL_MS) {
+    return appsCache.value;
   }
-  return `启动失败（${target}）：${hint}`;
+  const script = `
+$dirs = @(
+  [Environment]::GetFolderPath('Desktop'),
+  "$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+  "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs"
+) | Where-Object { Test-Path $_ }
+$apps = @()
+foreach ($d in $dirs) {
+  $apps += Get-ChildItem -LiteralPath $d -Recurse -Include *.lnk,*.url -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.BaseName -notmatch 'uninstall|卸载|help|readme|更新|update' } |
+    ForEach-Object { [ordered]@{ name = $_.BaseName; file = $_.FullName } }
+}
+Write-Output (ConvertTo-Json @($apps) -Depth 3 -Compress)`;
+  const data = await runPs(script, { runner, timeout });
+  const arr = Array.isArray(data) ? data : data ? [data] : [];
+  const value = arr
+    .map((item) => ({ name: String(item?.name ?? "").trim(), file: String(item?.file ?? "").trim() }))
+    // 双保险：PS 侧已过滤卸载项；这里再挡一次（含 runner 直供 JSON 的测试路径）
+    .filter((a) => a.name && a.file && !/uninstall|卸载|help|readme|更新|update/i.test(a.name));
+  if (!runner) appsCache = { value, at: Date.now() };
+  return value;
+}
+
+/** 测试专用：清空应用索引缓存。 */
+export function resetAppsCacheForTest() {
+  appsCache = null;
+}
+
+/** 名称归一化：小写 + 去空白（中文应用名常见「腾讯视频」「腾讯视频.lnk」）。 */
+const normAppName = (s) => String(s ?? "").toLowerCase().replace(/\s+/g, "");
+
+/**
+ * 按名称匹配已安装应用。排序：精确相等 > 互相包含 > 其余。
+ * @returns {Array<{name:string,file:string}>}
+ */
+export function matchApps(apps, query) {
+  const q = normAppName(query);
+  if (!q) return [];
+  const hits = apps.filter((a) => {
+    const n = normAppName(a.name);
+    return n === q || n.includes(q) || q.includes(n);
+  });
+  return hits.sort((a, b) => {
+    const rank = (x) => (normAppName(x.name) === q ? 0 : 1);
+    return rank(a) - rank(b);
+  });
 }
