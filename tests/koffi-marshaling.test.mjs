@@ -128,3 +128,43 @@ test("koffi.array 类型按长度可重复创建（匿名类型，无 Duplicate 
   const a2 = koffi.array(INPUT_T, 3);
   assert.equal(koffi.sizeof(a1), koffi.sizeof(a2));
 });
+
+// ---- 0.7.2 点击标记分层窗口（DWM 修复）----
+const WC_T = koffi.struct("T_WC", {
+  cbSize: "uint32", style: "uint32", lpfnWndProc: "uintptr",
+  cbClsExtra: "int32", cbWndExtra: "int32", hInstance: "void*",
+  hIcon: "void*", hCursor: "void*", hbrBackground: "void*",
+  lpszMenuName: "str16", lpszClassName: "str16", hIconSm: "void*"
+});
+
+test("WNDCLASSEXW 布局：sizeof=80，与 WinUser.h 逐偏移一致（str16 字段可用）", () => {
+  assert.equal(koffi.sizeof(WC_T), 80);
+  assert.equal(koffi.offsetof(WC_T, "cbSize"), 0);
+  assert.equal(koffi.offsetof(WC_T, "lpfnWndProc"), 8, "4+4 对齐填充后函数指针 @8");
+  assert.equal(koffi.offsetof(WC_T, "cbClsExtra"), 16);
+  assert.equal(koffi.offsetof(WC_T, "hInstance"), 24);
+  assert.equal(koffi.offsetof(WC_T, "lpszMenuName"), 56);
+  assert.equal(koffi.offsetof(WC_T, "lpszClassName"), 64);
+  assert.equal(koffi.offsetof(WC_T, "hIconSm"), 72);
+  const p = koffi.alloc(WC_T, 1);
+  koffi.encode(p, WC_T, {
+    cbSize: 80, style: 0, lpfnWndProc: 0x7ffb12345678, cbClsExtra: 0, cbWndExtra: 0,
+    hInstance: 0x7ffb00000000, hIcon: null, hCursor: null, hbrBackground: null,
+    lpszMenuName: "", lpszClassName: "SecAgentFlash", hIconSm: null
+  });
+  const procAddr = koffi.decode(p, koffi.offsetof(WC_T, "lpfnWndProc"), "uintptr");
+  assert.equal(Number(procAddr), 0x7ffb12345678, "函数指针（GetProcAddress 返回的 DefWindowProcW 地址）无损往返");
+});
+
+test("BLENDFUNCTION/SIZE 封送 + uint32 预乘像素数组", () => {
+  const BF = koffi.struct("T_BF2", { blendOp: "uint8", blendFlags: "uint8", sourceConstantAlpha: "uint8", alphaFormat: "uint8" });
+  assert.equal(koffi.sizeof(BF), 4);
+  const SZ = koffi.struct("T_SZ2", { cx: "int32", cy: "int32" });
+  assert.equal(koffi.sizeof(SZ), 8);
+  // 预乘 BGRA：alpha=200 → 0xC8 C8 1F 1F（JS 位运算结果必须 >>> 0 转 unsigned）
+  const px = ((200 << 24) | (200 << 16) | (31 << 8) | 31) >>> 0;
+  const arr = koffi.array("uint32", 3);
+  const a = koffi.alloc(arr, 1);
+  koffi.encode(a, arr, [0, px, 0xff]);
+  assert.equal(koffi.decode(a, 4, "uint32"), 0xc8c81f1f);
+});
