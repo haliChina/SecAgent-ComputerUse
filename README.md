@@ -8,7 +8,8 @@
 - **v0.5 起**统一**坐标契约**（截图长边缩放 + 多显示器归一，所有 x,y 都是截图内相对坐标）、新增 **wait / cursor_position / windows / focus / launch / clipboard** 原语、**inspect(scope=desktop)** 可侦察任务栏与桌面；
 - **v0.7 起**加入**浏览器扩展桥**：配对「SecAgent 浏览器桥」扩展（Chrome/Edge，本仓库 `extension/`）后，网页任务可 `inspect(backend="extension")` 直读 DOM——毫秒级、真实元素结构；另有 `tabs`（列/切标签页）与 `read_page`（读页面文本）工具；auto 模式在 UIA 稀疏时自动回退扩展（先于 OmniParser）。安装配对见 [docs/EXTENSION.md](docs/EXTENSION.md)；
 - **v0.7.1 起**：**type 中文乱码根因修复**（keybd_event 8 位 bScan 截断 → SendInput 16 位 wScan）；**点击落点红圈标记**（Agent 操作肉眼可循迹，设置可关）；**launch 直接吃应用名**（桌面/开始菜单快捷方式自动索引回退，spawn 挂死 15s 超时兜底）+ 新工具 `apps` 搜索已安装应用；**扩展零输入配对**（固定端口自动发现 + 控制台一键允许，小白三步完成）。
-- **v0.7.2**：修 **点击标记实机不可见**——0.7.1 直接画屏幕 DC 的内容不进 DWM 合成（桌面永远看不到）；改为**分层窗口**（UpdateLayeredWindow + 预乘 alpha 位图，红环 + 亮心 300ms），独立于窗口重绘管线，任何环境下可见。
+- **v0.7.2**：修 **点击标记实机不可见**——0.7.1 直接画屏幕 DC 的内容不进 DWM 合成（桌面永远看不到）；改为**分层窗口**（UpdateLayeredWindow + 预乘 alpha 位图，红环 + 亮心 300ms），独立于窗口重绘管线。
+- **v0.7.3**：分层窗口实机**仍不可见**（缺 Windows 侧观测手段）——发光反馈归位宿主：新增 `api.flashMarker`（宿主透明窗 + **跑马灯 AI 光效**），插件双通道调用（宿主优先、koffi 兜底+全程诊断）。**全操作发光**：点击/移动/拖拽=跑马灯光环（红）、**输入=输入区域胶囊**（蓝色 caret 闪烁）、**组合键=键帽浮标显示按的什么**（如 Ctrl+C）、滚动=方向箭头轻提示、聚焦=窗口中心琥珀环。doctor 新增发光通道自检（报告 host/native/off）。所有动画点击穿透，绝不影响鼠标操作。
 
 - 格式：SecAgent 自有插件（`secagent-plugin.json` + `main.mjs`）
 - 系统：动作仅 Windows（依赖 user32/gdi32 + PowerShell）；设置控制台在任意平台可打开

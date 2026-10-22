@@ -81,7 +81,8 @@ export class WindowsDriver {
     uiaTimeoutMs = 15000, clickableOnly = true,
     maxSidePixels = 0,
     configProvider,
-    extBridge = null
+    extBridge = null,
+    hostFlash = null
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
@@ -96,6 +97,9 @@ export class WindowsDriver {
     this.clickableOnly = clickableOnly;
     this.maxSidePixels = maxSidePixels;
     this.configProvider = typeof configProvider === "function" ? configProvider : null;
+    this.hostFlash = typeof hostFlash === "function" ? hostFlash : null;
+    /** 最近一次发光标记的诊断（doctor 可查：via/ok/stage）。 */
+    this.lastFlash = null;
     this.#lastMap = { elements: [], total: 0, truncated: false, source: "uia" };
   }
 
@@ -140,6 +144,53 @@ export class WindowsDriver {
   async #ensureNative() {
     if (!this.native) this.native = createKoffiNative();
     return this.native;
+  }
+
+  /**
+   * 操作落点发光标记（0.7.3 重做）。双通道：
+   * ① 首选宿主 api.flashMarker——宿主用透明 BrowserWindow + 跑马灯 AI 光效
+   *   画反馈（跨平台、必然进合成器；computer-use 0.7.1/0.7.2 的原生 koffi
+   *   窗口两次实机均不可见——插件 in-process 但仍缺 Windows 侧观测手段，
+   *   视觉反馈归位宿主 UI 职责）；
+   * ② 兜底 koffi 分层窗口（老宿主），全程 per-monitor aware 线程（物理
+   *   坐标一致解释）。
+   * 样式（宿主侧）：click/focus=跑马灯光环、type=输入胶囊、chord=键帽
+   * 浮标（显示按了什么）、scroll=方向箭头轻提示。全部点击穿透。
+   * fire-and-forget：任何失败静默并记入 lastFlash 诊断，绝不影响动作。
+   * @param {{x:number,y:number}} abs 物理绝对坐标
+   * @param {"click"|"type"|"focus"|"scroll"|"chord"} kind
+   * @param {number} [radius]
+   * @param {{label?:string,direction?:number}} [extra] chord 键文本 / 滚动方向
+   * @returns {Promise<{via:string,ok:boolean,stage?:string,error?:string}>}
+   */
+  async #flash(abs, kind = "click", radius = 13, extra = null) {
+    const cfg = this.#cfg();
+    if (cfg.actionFlash === false || (cfg.actionFlash == null && cfg.clickFlash === false))
+      return (this.lastFlash = { via: "off", ok: false, reason: "actionFlash/clickFlash=false" });
+    if (typeof this.hostFlash === "function") {
+      try {
+        this.hostFlash(Math.round(abs.x), Math.round(abs.y), { kind, radius, ...(extra || {}) });
+        return (this.lastFlash = { via: "host", ok: true });
+      } catch (error) {
+        this.lastFlash = { via: "host", ok: false, error: String(error?.message ?? error) };
+      }
+    }
+    try {
+      const n = await this.#ensureNative();
+      if (typeof n.flashMarker === "function") {
+        const r = await this.#withThreadDpi(() =>
+          n.flashMarker(Math.round(abs.x), Math.round(abs.y), radius, kind));
+        return (this.lastFlash = r ?? { via: "native", ok: false, stage: "no-return" });
+      }
+    } catch (error) {
+      return (this.lastFlash = { via: "native", ok: false, stage: "exception", error: String(error?.message ?? error) });
+    }
+    return (this.lastFlash = { via: "none", ok: false, reason: "无可用通道（非 Windows 或无 koffi native）" });
+  }
+
+  /** 公开落点发光（物理坐标直闪）：focus 等系统级操作成功后由 main.mjs 调用。 */
+  async flashAt(x, y, kind = "focus", radius = 13) {
+    return await this.#flash({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }, kind, radius);
   }
 
   // 线程级 DPI 上下文（PER_MONITOR_AWARE_V2），截图与动作同一上下文、坐标自洽。
@@ -400,6 +451,9 @@ export class WindowsDriver {
     return await this.#withThreadDpi(() => {
       const p = this.#toAbsolute(x, y);
       this.native.setCursorPos(p.x, p.y);
+      // 移动落点小环（0.7.3，用户要求「移动同鼠标发光」）：轻量小环，
+      // 与点击同款跑马灯但半径更小、时长更短
+      this.#flash(p, "click", 9, { ms: 320 }).catch(() => { /* 无碍 */ });
       return { moved: { x, y } };
     });
   }
@@ -439,10 +493,8 @@ export class WindowsDriver {
         this.native.mouseEvent(b.up, 0);
       }
     });
-    // 落点视觉标记（#12）：默认开，设置可关；旧 native/测试桩无此方法时跳过。
-    if (this.#cfg().clickFlash !== false && typeof this.native.flashMarker === "function") {
-      try { this.native.flashMarker(abs.x, abs.y); } catch { /* 无碍 */ }
-    }
+    // 落点视觉标记（#12 → 0.7.3）：宿主发光优先、koffi 兜底；设置可关。
+    this.#flash(abs, "click").catch(() => { /* 无碍 */ });
     return { clicked: { ...label, button, double } };
   }
 
@@ -474,6 +526,8 @@ export class WindowsDriver {
         if (i < steps) await new Promise((resolve) => setTimeout(resolve, 8));
       }
       this.native.mouseEvent(b.up, 0);
+      // 拖拽落点发光（终点处，红色）——无碍失败
+      try { this.#flash(to, "click", 11).catch(() => {}); } catch { /* ignore */ }
       return { dragged: { from: { x: fromX, y: fromY }, to: { x: toX, y: toY } } };
     });
   }
@@ -482,10 +536,12 @@ export class WindowsDriver {
   async scroll(x, y, amount) {
     const n = amount | 0;
     if (!n) throw new Error("滚动量不能为 0");
-    return await this.#withThreadDpi(() => {
+    return await this.#withThreadDpi(async () => {
       const p = this.#toAbsolute(x, y);
       this.native.setCursorPos(p.x, p.y);
       this.native.mouseEvent(MOUSEEVENTF.wheel, n * WHEEL_DELTA);
+      // 滚动轻量提示（0.7.3，用户要求）：方向箭头短促渐隐，不喧宾夺主
+      this.#flash(p, "scroll", 10, { direction: n > 0 ? 1 : -1 }).catch(() => { /* 无碍 */ });
       return { scrolled: { x, y, amount: n } };
     });
   }
@@ -516,6 +572,8 @@ export class WindowsDriver {
             `SendInput 只接受了 ${accepted}/${events.length} 个事件——目标很可能是管理员权限窗口（UIPI 拦截）。` +
               `请用管理员身份重启 SecAgent，或改在普通权限窗口输入。`
           );
+        // 输入落点发光（光标处，蓝色）——无碍失败
+        try { this.#flash(this.native.cursorPos(), "type", 11).catch(() => {}); } catch { /* ignore */ }
         return { typed: { length: text.length }, mode: "sendinput" };
       }
 
@@ -553,6 +611,13 @@ export class WindowsDriver {
         for (let i = modifiers.length - 1; i >= 0; i--)
           press(modifiers[i], KEYEVENTF_KEYUP);
       }
+      // 组合键浮标（0.7.3，用户要求「显示按的什么」）：键帽样式显示
+      // 规范化键序列（如 Ctrl+C），随光标位置浮现渐隐。无碍失败。
+      try {
+        const label = String(text).split("+").map((w) => w.trim()).filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join("+");
+        this.#flash(this.native.cursorPos(), "chord", 12, { label }).catch(() => {});
+      } catch { /* ignore */ }
       return { pressed: text };
     });
   }
@@ -794,23 +859,26 @@ export function createKoffiNative(koffiImpl) {
       return SendInput(n, ptr, koffi.sizeof(InputStruct));
     },
     /**
-     * 点击落点视觉标记（#12：Agent 操作肉眼可循迹）。
+     * 操作落点视觉标记（koffi 兜底通道，0.7.3）。
      *
-     * 0.7.2 重做：0.7.1 直接在屏幕 DC 上画 GDI 图形（GetDC(NULL)+Ellipse）
-     * 实机**完全不可见**——DWM 合成器根本不把直接绘制到重定向表面之外的
-     * 屏幕 DC 内容合成进桌面（用户反馈「没看到发光的鼠标」）。分层窗口
-     * （UpdateLayeredWindow + 预乘 alpha 位图）独立于窗口重绘管线，永远
-     * 可见：红环 + 亮中心点 300ms 后销毁。全程 best-effort：失败静默，
-     * 绝不影响点击本身。
+     * 历史：0.7.1 直绘屏幕 DC（GetDC+Ellipse）不进 DWM 合成——实机
+     * 不可见；0.7.2 改分层窗口（UpdateLayeredWindow+预乘 alpha）实机
+     * **仍然不可见**（两次装机验证；插件 in-process 于 Electron 主进程，
+     * 但线程/窗口站/DPI 等因素在 Windows 侧无观测手段）。0.7.3 起
+     * **宿主 api.flashMarker 为首选通道**（透明 BrowserWindow+CSS 发光，
+     * 必然可见）；本函数仅老宿主兜底，且每步返回诊断（doctor 可见），
+     * 不再静默吞错。
      *
-     * 细节：窗口类只注册一次（DefWindowProcW 作 wndproc，NOACTIVATE+
-     * TRANSPARENT+TOOLWINDOW 不抢焦点不挡输入，无需消息泵）；NOACTIVATE
-     * 窗口短期存活动后 DestroyWindow 不需要跑消息循环。
+     * 注意：调用方应已在 per-monitor aware 线程上下文（#flash 自带
+     * #withThreadDpi 包裹）——窗口坐标与动作物理坐标一致解释。
      * @param {number} x 物理绝对坐标
      * @param {number} y
-     * @param {number} [radius=12] 环半径（物理像素）
+     * @param {number} [radius=13] 环半径（物理像素）
+     * @param {"click"|"type"|"focus"|"scroll"} [kind="click"] 颜色语义
+     * @returns {{via:"native",ok:boolean,stage?:string,error?:string}} 诊断
      */
-    flashMarker: (x, y, radius = 12) => {
+    flashMarker: (x, y, radius = 13, kind = "click") => {
+      const fail = (stage, error) => ({ via: "native", ok: false, stage, error: error ? String(error) : undefined });
       try {
         const r = Math.max(4, radius | 0);
         const pad = 4;
@@ -820,9 +888,9 @@ export function createKoffiNative(koffiImpl) {
         // 窗口类（进程内一次性注册并缓存）
         if (!native.flashClassAtom) {
           const inst = GetModuleHandleW("user32.dll");
-          if (!inst) return;
+          if (!inst) return fail("module");
           const proc = GetProcAddress(inst, "DefWindowProcW");
-          if (!proc) return;
+          if (!proc) return fail("proc");
           const wc = koffi.alloc(WndClassExW, 1);
           koffi.encode(wc, WndClassExW, {
             cbSize: koffi.sizeof(WndClassExW),
@@ -839,7 +907,7 @@ export function createKoffiNative(koffiImpl) {
             hIconSm: null
           });
           const atom = RegisterClassExW(wc);
-          if (!atom) return;
+          if (!atom) return fail("class");
           native.flashClassAtom = atom;
           native.flashHinstance = inst;
         }
@@ -853,10 +921,17 @@ export function createKoffiNative(koffiImpl) {
           FLASH_CLASS_NAME, "", WS_POPUP, left, top, w, h,
           null, null, native.flashHinstance, null
         );
-        if (!hwnd) return;
+        if (!hwnd) return fail("window");
 
-        // 预乘 BGRA 像素：暖红环（±2px 软边）+ 更亮中心点
-        const G = 40, B = 40;
+        // 预乘 BGRA 像素：色环（±2px 软边）+ 亮中心点。kind 配色与宿主一致。
+        const PALETTE = {
+          click: [255, 40, 40],   // 红
+          type: [63, 140, 255],   // 蓝
+          focus: [255, 176, 46],  // 琥珀
+          scroll: [160, 107, 255],// 紫
+          chord: [155, 208, 255]  // 键帽蓝白
+        };
+        const [cr, cg, cb] = PALETTE[kind] ?? PALETTE.click;
         const cx = w / 2, cy = h / 2;
         const ringHi = r + 2, ringLo = r - 2;
         const pixels = new Array(w * h);
@@ -867,16 +942,25 @@ export function createKoffiNative(koffiImpl) {
             if (d >= ringLo && d <= ringHi) a = 200;
             else if (d < 3.5) a = 235;
             pixels[py * w + px] = a
-              ? ((a << 24) | (Math.round(255 * a / 255) << 16) | (Math.round(G * a / 255) << 8) | Math.round(B * a / 255)) >>> 0
+              ? ((a << 24) | (Math.round(cr * a / 255) << 16) | (Math.round(cg * a / 255) << 8) | Math.round(cb * a / 255)) >>> 0
               : 0;
           }
         }
 
         // 位图：DIB 头（top-down 32bpp）+ SetDIBits 灌预乘像素到兼容位图
-        const dc = GetDC(null);
-        if (!dc) { try { DestroyWindow(hwnd); } catch { /* ignore */ } return; }
-        let memDC = null, bmp = null;
+        let dc = null, memDC = null, bmp = null;
+        const cleanup = () => {
+          const t = setTimeout(() => {
+            try { DestroyWindow(hwnd); } catch { /* ignore */ }
+            try { if (bmp) DeleteObject(bmp); } catch { /* ignore */ }
+            try { if (memDC) DeleteDC(memDC); } catch { /* ignore */ }
+            try { if (dc) ReleaseDC(null, dc); } catch { /* ignore */ }
+          }, 300);
+          if (t.unref) t.unref();
+        };
         try {
+          dc = GetDC(null);
+          if (!dc) { cleanup(); return fail("getdc"); }
           memDC = CreateCompatibleDC(dc);
           bmp = CreateCompatibleBitmap(dc, w, h);
           SelectObject(memDC, bmp);
@@ -889,7 +973,8 @@ export function createKoffiNative(koffiImpl) {
           const pixelType = koffi.array("uint32", w * h);
           const bits = koffi.alloc(pixelType, 1);
           koffi.encode(bits, pixelType, pixels);
-          if (SetDIBits(dc, bmp, 0, h, bits, bmi, 0) === 0) return;
+          // 0.7.3 修复：SetDIBits 失败也必须走 cleanup（旧路径泄漏窗口+DC）
+          if (SetDIBits(dc, bmp, 0, h, bits, bmi, 0) === 0) { cleanup(); return fail("setdibits"); }
 
           const dstPt = koffi.alloc(PointStruct, 1);
           koffi.encode(dstPt, PointStruct, { x: left, y: top });
@@ -901,18 +986,20 @@ export function createKoffiNative(koffiImpl) {
           koffi.encode(blend, BlendFunction, {
             blendOp: 0, blendFlags: 0, sourceConstantAlpha: 255, alphaFormat: 1 /* AC_SRC_ALPHA */
           });
-          UpdateLayeredWindow(hwnd, null, dstPt, size, memDC, srcPt, 0, blend, 2 /* ULW_ALPHA */);
+          if (!UpdateLayeredWindow(hwnd, null, dstPt, size, memDC, srcPt, 0, blend, 2 /* ULW_ALPHA */)) {
+            cleanup();
+            return fail("ulw");
+          }
           ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
-        } finally {
-          const t = setTimeout(() => {
-            try { DestroyWindow(hwnd); } catch { /* ignore */ }
-            try { if (bmp) DeleteObject(bmp); } catch { /* ignore */ }
-            try { if (memDC) DeleteDC(memDC); } catch { /* ignore */ }
-            try { ReleaseDC(null, dc); } catch { /* ignore */ }
-          }, 300);
-          if (t.unref) t.unref();
+          cleanup();
+          return { via: "native", ok: true };
+        } catch (error) {
+          cleanup();
+          return fail("exception", error?.message ?? error);
         }
-      } catch { /* 标记失败无碍 */ }
+      } catch (error) {
+        return fail("outer", error?.message ?? error);
+      }
     }
   };
   native.flashClassAtom = 0;

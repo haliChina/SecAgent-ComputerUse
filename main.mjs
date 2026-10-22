@@ -67,7 +67,16 @@ export async function activate(api) {
   });
 
   // driver 通过 configProvider 动态读取设置（含 OmniParser 开关 / 扩展桥）。
-  const driver = new WindowsDriver({ configProvider: readConfig, extBridge });
+  // 0.7.3：注入宿主发光通道（api.flashMarker，宿主 ≥ flash PR 版本才有），
+  // 点击/输入/聚焦/滚动的落点反馈优先走宿主透明窗（koffi 分层窗口兜底）。
+  const driver = new WindowsDriver({
+    configProvider: readConfig,
+    extBridge,
+    hostFlash:
+      typeof api.flashMarker === "function"
+        ? (x, y, opts) => api.flashMarker(x, y, opts)
+        : null
+  });
 
   // OmniParser 一键安装管理器（数据在用户主目录，不随插件包分发）。
   // 镜像地址从设置动态读取，安装/启动时生效。
@@ -189,7 +198,9 @@ export async function activate(api) {
         loadNative: () => createKoffiNative(),
         detectPython: () => manager.detectPython(),
         getOmniStatus: () => manager.status(),
-        getExtStatus: () => extBridge.status()
+        getExtStatus: () => extBridge.status(),
+        // 发光标记自检：屏幕中心真实闪一次，报告走哪条通道（host/native/off）
+        flashProbe: async () => await driver.flashAt(960, 540, "focus", 18)
       });
       return {
         ok: result.ok,
@@ -370,7 +381,12 @@ export async function activate(api) {
     guarded("focus", async (a) => {
       if (typeof a.title !== "string" || !a.title.trim())
         throw new Error("focus 需要非空 title（窗口标题正则）");
-      return await focusWindow({ title: a.title, timeout: readConfig().uiaTimeoutMs });
+      const res = await focusWindow({ title: a.title, timeout: readConfig().uiaTimeoutMs });
+      // 聚焦落点发光（0.7.3，用户要求）：目标窗口中心闪琥珀色标记——
+      // 用户肉眼可循 Agent 的焦点切换轨迹。无碍失败。
+      if (res?.focused && res.center)
+        driver.flashAt(res.center.x, res.center.y, "focus", 16).catch(() => {});
+      return res;
     })
   );
 

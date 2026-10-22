@@ -24,7 +24,8 @@ export async function runDoctor(deps = {}) {
     uiaTimeoutMs = 8000,
     detectPython = null,
     getOmniStatus = null,
-    getExtStatus = null
+    getExtStatus = null,
+    flashProbe = null
   } = deps;
 
   const checks = [];
@@ -123,6 +124,33 @@ export async function runDoctor(deps = {}) {
       );
     } catch (error) {
       push("python", "Python（OmniParser 可选）", false, error?.message ?? String(error), "");
+    }
+  }
+
+  // 5.5) 操作发光标记（0.7.3：宿主 api.flashMarker 优先，koffi 兜底）
+  if (typeof flashProbe === "function") {
+    try {
+      const r = await flashProbe();
+      // via=host：宿主透明窗通道（推荐，视觉质感最好）；native：koffi
+      // 分层窗口兜底（0.7.1/0.7.2 实机曾不可见——宿主通道才是可见性保证）
+      push(
+        "flash",
+        "操作发光标记",
+        r?.via === "host",
+        r?.via === "host"
+          ? "宿主 api.flashMarker 通道正常（点击/输入/聚焦/滚动落点发光）"
+          : r?.via === "native"
+            ? `走 koffi 兜底通道（${r?.ok ? "调用成功" : `失败于 ${r?.stage ?? "未知阶段"}`}）——宿主版本过旧无 api.flashMarker。兜底通道在部分机器上不可见（0.7.1/0.7.2 已知），建议升级宿主`
+            : r?.via === "off"
+              ? "设置里已关闭（actionFlash/clickFlash=false）"
+              : `无可用通道：${r?.reason ?? r?.stage ?? "未知"}`,
+        r?.via === "host"
+          ? ""
+          : "升级 SecAgent 宿主到支持 api.flashMarker 的版本（与 computer-use 0.7.3+ 配套）即可获得跑马灯光效反馈；临时可用 koffi 兜底。",
+        true
+      );
+    } catch (error) {
+      push("flash", "操作发光标记", false, error?.message ?? String(error), "", true);
     }
   }
 
