@@ -115,14 +115,35 @@ export async function focusWindow({ title, runner, timeout } = {}) {
     matched.find(
       (w) => w.title.toLowerCase() === wanted || (w.name && w.name.toLowerCase() === wanted)
     ) ?? matched[0];
+  // 0.7.3：顺带返回窗口中心（物理像素）——focus 成功后在目标窗口中心
+  // 闪发光标记（用户要求聚焦也要有发光）。GetWindowRect 与点击同一坐标空间。
   const script = `${USER32}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class SecAgentWin32Rect {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+}
+"@
 $h = [IntPtr]::new($(${target.handle}))
 [void][SecAgentWin32]::ShowWindow($h, 9)
 $ok = [SecAgentWin32]::SetForegroundWindow($h)
 [void][SecAgentWin32]::BringWindowToTop($h)
-Write-Output (ConvertTo-Json ([ordered]@{ focused = $ok; title = '${target.title.replace(/'/g, "''")}' }) -Compress)`;
+$rect = New-Object SecAgentWin32Rect+RECT
+$hasRect = [SecAgentWin32Rect]::GetWindowRect($h, [ref]$rect)
+$center = if ($hasRect) { @{ x = [int](($rect.Left + $rect.Right) / 2); y = [int](($rect.Top + $rect.Bottom) / 2) } } else { $null }
+Write-Output (ConvertTo-Json ([ordered]@{ focused = $ok; title = '${target.title.replace(/'/g, "''")}'; center = $center }) -Compress)`;
   const res = await runPs(script, { runner, timeout });
-  return { focused: Boolean(res?.focused), title: target.title, pid: target.pid, handle: target.handle };
+  return {
+    focused: Boolean(res?.focused),
+    title: target.title,
+    pid: target.pid,
+    handle: target.handle,
+    center: res?.center && Number.isFinite(Number(res.center.x)) && Number.isFinite(Number(res.center.y))
+      ? { x: Math.round(Number(res.center.x)), y: Math.round(Number(res.center.y)) }
+      : null
+  };
 }
 
 /** 读取剪贴板文本。 */
