@@ -607,17 +607,30 @@ export function createKoffiNative(koffiImpl) {
   const keybd_event = user32.func("void keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr dwExtraInfo)");
   const SendInput = user32.func("uint32 SendInput(uint32 cInputs, void* pInputs, int cbSize)");
   const MapVirtualKeyW = user32.func("uint32 MapVirtualKeyW(uint32 uCode, uint32 uMapType)");
-  // 点击落点标记（#12）：画环 → 300ms 后只失效标记矩形让其自然消失。
-  const InvalidateRect = user32.func("bool InvalidateRect(void* hWnd, void* lpRect, bool bErase)");
+  // 点击落点标记（#12）：DWM 合成下直接画屏幕 DC 不可见（0.7.1 实机验证
+  // 「没看到发光的鼠标」的根因）——必须走分层窗口 + UpdateLayeredWindow，
+  // 独立于窗口重绘管线，永远可见。
+  const GetModuleHandleW = user32.func("void* GetModuleHandleW(str16 name)");
+  const GetProcAddress = user32.func("intptr GetProcAddress(void* hModule, str name)"); // ANSI 入参
+  const RegisterClassExW = user32.func("uint16 RegisterClassExW(void* lpWndClass)");
+  const CreateWindowExW = user32.func(
+    "void* CreateWindowExW(uint32 dwExStyle, str16 class, str16 name, uint32 style, " +
+    "int32 x, int32 y, int32 w, int32 h, void* parent, void* menu, void* inst, void* param)"
+  );
+  const SetDIBits = user32.func(
+    "int SetDIBits(void* hdc, void* hbmp, uint32 start, uint32 lines, void* bits, void* bmi, uint32 usage)"
+  );
+  const UpdateLayeredWindow = user32.func(
+    "bool UpdateLayeredWindow(void* hwnd, void* hdcDst, void* pptDst, void* psize, " +
+    "void* hdcSrc, void* pptSrc, uint32 crKey, void* pblend, uint32 flags)"
+  );
+  const ShowWindow = user32.func("int ShowWindow(void* hwnd, int nCmdShow)");
+  const DestroyWindow = user32.func("bool DestroyWindow(void* hwnd)");
 
   const CreateCompatibleDC = gdi32.func("void* CreateCompatibleDC(void* hdc)");
   const DeleteDC = gdi32.func("int DeleteDC(void* hdc)");
   const CreateCompatibleBitmap = gdi32.func("void* CreateCompatibleBitmap(void* hdc, int cx, int cy)");
   const SelectObject = gdi32.func("void* SelectObject(void* hdc, void* h)");
-  const CreatePen = gdi32.func("void* CreatePen(int iPenStyle, int cWidth, uint32 color)");
-  const CreateSolidBrush = gdi32.func("void* CreateSolidBrush(uint32 color)");
-  const GetStockObject = gdi32.func("void* GetStockObject(int i)");
-  const Ellipse = gdi32.func("bool Ellipse(void* hdc, int left, int top, int right, int bottom)");
   const BitBlt = gdi32.func(
     "bool BitBlt(void* hdcDest, int x, int y, int w, int h, void* hdcSrc, int x1, int y1, uint32 rop)"
   );
@@ -641,7 +654,29 @@ export function createKoffiNative(koffiImpl) {
   });
 
   const PointStruct = koffi.struct("SA_POINT", { x: "int32", y: "int32" });
-  const RectStruct = koffi.struct("SA_RECT", { left: "int32", top: "int32", right: "int32", bottom: "int32" });
+  // 点击标记分层窗口（DWM 安全）——布局与 WinUser.h 逐字节对齐：
+  const SizeStruct = koffi.struct("SA_SIZE", { cx: "int32", cy: "int32" });
+  const BlendFunction = koffi.struct("SA_BLENDFUNC", {
+    blendOp: "uint8",            // AC_SRC_OVER=0
+    blendFlags: "uint8",         // 0
+    sourceConstantAlpha: "uint8", // 255
+    alphaFormat: "uint8"         // AC_SRC_ALPHA=1
+  });
+  const WndClassExW = koffi.struct("SA_WNDCLASSEXW", {
+    cbSize: "uint32",        // @0
+    style: "uint32",         // @4
+    lpfnWndProc: "uintptr",  // @8：DefWindowProcW 原生地址（GetProcAddress）
+    cbClsExtra: "int32",     // @16
+    cbWndExtra: "int32",     // @20
+    hInstance: "void*",      // @24
+    hIcon: "void*",          // @32
+    hCursor: "void*",        // @40
+    hbrBackground: "void*",  // @48
+    lpszMenuName: "str16",   // @56
+    lpszClassName: "str16",  // @64
+    hIconSm: "void*"         // @72
+  }); // sizeof=80
+  const FLASH_CLASS_NAME = "SecAgentFlash";
 
   // INPUT（键盘形态，Win64）：显式排布到与 WinUser.h 完全一致的字节布局。
   //   type@0(4) + 联合体对齐填充@4 + wVk@8 + wScan@10 + dwFlags@12 + time@16
@@ -759,57 +794,129 @@ export function createKoffiNative(koffiImpl) {
       return SendInput(n, ptr, koffi.sizeof(InputStruct));
     },
     /**
-     * 点击落点视觉标记（#12：让用户肉眼可循 Agent 的操作轨迹）。
-     * 在屏幕 DC 画红环+红点 → 300ms 后只失效标记矩形（目标区域自然重绘
-     * 抹掉标记）。全程 best-effort：任何失败静默（绝不影响点击本身）。
+     * 点击落点视觉标记（#12：Agent 操作肉眼可循迹）。
+     *
+     * 0.7.2 重做：0.7.1 直接在屏幕 DC 上画 GDI 图形（GetDC(NULL)+Ellipse）
+     * 实机**完全不可见**——DWM 合成器根本不把直接绘制到重定向表面之外的
+     * 屏幕 DC 内容合成进桌面（用户反馈「没看到发光的鼠标」）。分层窗口
+     * （UpdateLayeredWindow + 预乘 alpha 位图）独立于窗口重绘管线，永远
+     * 可见：红环 + 亮中心点 300ms 后销毁。全程 best-effort：失败静默，
+     * 绝不影响点击本身。
+     *
+     * 细节：窗口类只注册一次（DefWindowProcW 作 wndproc，NOACTIVATE+
+     * TRANSPARENT+TOOLWINDOW 不抢焦点不挡输入，无需消息泵）；NOACTIVATE
+     * 窗口短期存活动后 DestroyWindow 不需要跑消息循环。
      * @param {number} x 物理绝对坐标
      * @param {number} y
      * @param {number} [radius=12] 环半径（物理像素）
      */
     flashMarker: (x, y, radius = 12) => {
-      const PS_SOLID = 0;
-      const NULL_BRUSH = 5;
-      const RED = 0x000000ff; // COLORREF 0x00BBGGRR
-      let dc = null, pen = null, brush = null, oldPen = null, oldBrush = null;
       try {
-        dc = GetDC(null);
-        if (!dc) return;
         const r = Math.max(4, radius | 0);
-        // 环（空刷只描边）
-        pen = CreatePen(PS_SOLID, 3, RED);
-        if (pen) {
-          oldPen = SelectObject(dc, pen);
-          const nb = GetStockObject(NULL_BRUSH);
-          if (nb) oldBrush = SelectObject(dc, nb);
-          Ellipse(dc, x - r, y - r, x + r, y + r);
-          if (nb && oldBrush) SelectObject(dc, oldBrush);
+        const pad = 4;
+        const w = 2 * r + 2 * pad;
+        const h = w;
+
+        // 窗口类（进程内一次性注册并缓存）
+        if (!native.flashClassAtom) {
+          const inst = GetModuleHandleW("user32.dll");
+          if (!inst) return;
+          const proc = GetProcAddress(inst, "DefWindowProcW");
+          if (!proc) return;
+          const wc = koffi.alloc(WndClassExW, 1);
+          koffi.encode(wc, WndClassExW, {
+            cbSize: koffi.sizeof(WndClassExW),
+            style: 0,
+            lpfnWndProc: proc,
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: inst,
+            hIcon: null,
+            hCursor: null,
+            hbrBackground: null,
+            lpszMenuName: "",
+            lpszClassName: FLASH_CLASS_NAME,
+            hIconSm: null
+          });
+          const atom = RegisterClassExW(wc);
+          if (!atom) return;
+          native.flashClassAtom = atom;
+          native.flashHinstance = inst;
         }
-        // 中心点（实心红）
-        brush = CreateSolidBrush(RED);
-        if (brush) {
-          const ob = SelectObject(dc, brush);
-          Ellipse(dc, x - 3, y - 3, x + 3, y + 3);
-          if (ob) SelectObject(dc, ob);
+
+        const WS_POPUP = 0x80000000;
+        const WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80;
+        const WS_EX_TRANSPARENT = 0x20, WS_EX_LAYERED = 0x80000, WS_EX_NOACTIVATE = 0x8000000;
+        const left = Math.round(x - r - pad), top = Math.round(y - r - pad);
+        const hwnd = CreateWindowExW(
+          WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+          FLASH_CLASS_NAME, "", WS_POPUP, left, top, w, h,
+          null, null, native.flashHinstance, null
+        );
+        if (!hwnd) return;
+
+        // 预乘 BGRA 像素：暖红环（±2px 软边）+ 更亮中心点
+        const G = 40, B = 40;
+        const cx = w / 2, cy = h / 2;
+        const ringHi = r + 2, ringLo = r - 2;
+        const pixels = new Array(w * h);
+        for (let py = 0; py < h; py++) {
+          for (let px = 0; px < w; px++) {
+            const d = Math.hypot(px - cx + 0.5, py - cy + 0.5);
+            let a = 0;
+            if (d >= ringLo && d <= ringHi) a = 200;
+            else if (d < 3.5) a = 235;
+            pixels[py * w + px] = a
+              ? ((a << 24) | (Math.round(255 * a / 255) << 16) | (Math.round(G * a / 255) << 8) | Math.round(B * a / 255)) >>> 0
+              : 0;
+          }
         }
-      } catch { /* 标记失败无碍 */ } finally {
-        try { if (oldPen) SelectObject(dc, oldPen); } catch { /* ignore */ }
-        try { if (pen) DeleteObject(pen); } catch { /* ignore */ }
-        try { if (brush) DeleteObject(brush); } catch { /* ignore */ }
-        try { if (dc) ReleaseDC(null, dc); } catch { /* ignore */ }
-      }
-      // 300ms 后失效标记矩形：底层窗口收到 WM_PAINT 自然抹掉标记，
-      // 不整屏失效（避免闪烁）。
-      const t = setTimeout(() => {
+
+        // 位图：DIB 头（top-down 32bpp）+ SetDIBits 灌预乘像素到兼容位图
+        const dc = GetDC(null);
+        if (!dc) { try { DestroyWindow(hwnd); } catch { /* ignore */ } return; }
+        let memDC = null, bmp = null;
         try {
-          const pad = (radius | 0) + 8;
-          const rect = koffi.alloc(RectStruct, 1);
-          koffi.encode(rect, RectStruct, { left: x - pad, top: y - pad, right: x + pad, bottom: y + pad });
-          InvalidateRect(null, rect, true);
-        } catch { /* ignore */ }
-      }, 300);
-      if (t.unref) t.unref();
+          memDC = CreateCompatibleDC(dc);
+          bmp = CreateCompatibleBitmap(dc, w, h);
+          SelectObject(memDC, bmp);
+          const bmi = koffi.alloc(BitmapInfoHeader, 1);
+          koffi.encode(bmi, BitmapInfoHeader, {
+            biSize: 40, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32,
+            biCompression: 0, biSizeImage: w * h * 4, biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0, biClrUsed: 0, biClrImportant: 0
+          });
+          const pixelType = koffi.array("uint32", w * h);
+          const bits = koffi.alloc(pixelType, 1);
+          koffi.encode(bits, pixelType, pixels);
+          if (SetDIBits(dc, bmp, 0, h, bits, bmi, 0) === 0) return;
+
+          const dstPt = koffi.alloc(PointStruct, 1);
+          koffi.encode(dstPt, PointStruct, { x: left, y: top });
+          const size = koffi.alloc(SizeStruct, 1);
+          koffi.encode(size, SizeStruct, { cx: w, cy: h });
+          const srcPt = koffi.alloc(PointStruct, 1);
+          koffi.encode(srcPt, PointStruct, { x: 0, y: 0 });
+          const blend = koffi.alloc(BlendFunction, 1);
+          koffi.encode(blend, BlendFunction, {
+            blendOp: 0, blendFlags: 0, sourceConstantAlpha: 255, alphaFormat: 1 /* AC_SRC_ALPHA */
+          });
+          UpdateLayeredWindow(hwnd, null, dstPt, size, memDC, srcPt, 0, blend, 2 /* ULW_ALPHA */);
+          ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
+        } finally {
+          const t = setTimeout(() => {
+            try { DestroyWindow(hwnd); } catch { /* ignore */ }
+            try { if (bmp) DeleteObject(bmp); } catch { /* ignore */ }
+            try { if (memDC) DeleteDC(memDC); } catch { /* ignore */ }
+            try { ReleaseDC(null, dc); } catch { /* ignore */ }
+          }, 300);
+          if (t.unref) t.unref();
+        }
+      } catch { /* 标记失败无碍 */ }
     }
   };
+  native.flashClassAtom = 0;
+  native.flashHinstance = null;
   cachedKoffiNative = native;
   return native;
 }
