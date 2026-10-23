@@ -662,6 +662,11 @@ export function createKoffiNative(koffiImpl) {
   }
   const user32 = loadSystemLib(koffi, "user32.dll");
   const gdi32 = loadSystemLib(koffi, "gdi32.dll");
+  // 0.7.4：GetModuleHandleW / GetProcAddress 是 **kernel32** 导出、SetDIBits 是
+  // **gdi32** 导出——0.7.2/0.7.3 把它们错挂在 user32，koffi 立即解析抛
+  // 「Cannot find function」，整个 native 创建失败连累截图/点击/输入全废
+  // （用户实机：Agent 卡在「系统库加载失败」）。
+  const kernel32 = loadSystemLib(koffi, "kernel32.dll");
 
   const GetDC = user32.func("void* GetDC(void* hWnd)");
   const ReleaseDC = user32.func("int ReleaseDC(void* hWnd, void* hDC)");
@@ -672,25 +677,34 @@ export function createKoffiNative(koffiImpl) {
   const keybd_event = user32.func("void keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr dwExtraInfo)");
   const SendInput = user32.func("uint32 SendInput(uint32 cInputs, void* pInputs, int cbSize)");
   const MapVirtualKeyW = user32.func("uint32 MapVirtualKeyW(uint32 uCode, uint32 uMapType)");
-  // 点击落点标记（#12）：DWM 合成下直接画屏幕 DC 不可见（0.7.1 实机验证
-  // 「没看到发光的鼠标」的根因）——必须走分层窗口 + UpdateLayeredWindow，
-  // 独立于窗口重绘管线，永远可见。
-  const GetModuleHandleW = user32.func("void* GetModuleHandleW(str16 name)");
-  const GetProcAddress = user32.func("intptr GetProcAddress(void* hModule, str name)"); // ANSI 入参
-  const RegisterClassExW = user32.func("uint16 RegisterClassExW(void* lpWndClass)");
-  const CreateWindowExW = user32.func(
-    "void* CreateWindowExW(uint32 dwExStyle, str16 class, str16 name, uint32 style, " +
-    "int32 x, int32 y, int32 w, int32 h, void* parent, void* menu, void* inst, void* param)"
-  );
-  const SetDIBits = user32.func(
-    "int SetDIBits(void* hdc, void* hbmp, uint32 start, uint32 lines, void* bits, void* bmi, uint32 usage)"
-  );
-  const UpdateLayeredWindow = user32.func(
-    "bool UpdateLayeredWindow(void* hwnd, void* hdcDst, void* pptDst, void* psize, " +
-    "void* hdcSrc, void* pptSrc, uint32 crKey, void* pblend, uint32 flags)"
-  );
-  const ShowWindow = user32.func("int ShowWindow(void* hwnd, int nCmdShow)");
-  const DestroyWindow = user32.func("bool DestroyWindow(void* hwnd)");
+  // 点击落点标记（#12 → 0.7.4 懒防御）：flash 是**可选视觉功能**，其专属声明
+  // 任何失败（归属错/导出缺失）只禁用发光标记并记录原因——绝不连累
+  // 截图/点击/输入等动作链路。0.7.3 及以前它挂在顶层，声明失败=整个
+  // native 报废（用户实机 Agent 直接卡死）。
+  let flashApi = null;
+  let flashApiError = null;
+  try {
+    flashApi = {
+      GetModuleHandleW: kernel32.func("void* GetModuleHandleW(str16 name)"),
+      GetProcAddress: kernel32.func("intptr GetProcAddress(void* hModule, str name)"), // ANSI 入参
+      RegisterClassExW: user32.func("uint16 RegisterClassExW(void* lpWndClass)"),
+      CreateWindowExW: user32.func(
+        "void* CreateWindowExW(uint32 dwExStyle, str16 class, str16 name, uint32 style, " +
+        "int32 x, int32 y, int32 w, int32 h, void* parent, void* menu, void* inst, void* param)"
+      ),
+      SetDIBits: gdi32.func(
+        "int SetDIBits(void* hdc, void* hbmp, uint32 start, uint32 lines, void* bits, void* bmi, uint32 usage)"
+      ),
+      UpdateLayeredWindow: user32.func(
+        "bool UpdateLayeredWindow(void* hwnd, void* hdcDst, void* pptDst, void* psize, " +
+        "void* hdcSrc, void* pptSrc, uint32 crKey, void* pblend, uint32 flags)"
+      ),
+      ShowWindow: user32.func("int ShowWindow(void* hwnd, int nCmdShow)"),
+      DestroyWindow: user32.func("bool DestroyWindow(void* hwnd)")
+    };
+  } catch (error) {
+    flashApiError = String(error?.message ?? error);
+  }
 
   const CreateCompatibleDC = gdi32.func("void* CreateCompatibleDC(void* hdc)");
   const DeleteDC = gdi32.func("int DeleteDC(void* hdc)");
@@ -879,6 +893,8 @@ export function createKoffiNative(koffiImpl) {
      */
     flashMarker: (x, y, radius = 13, kind = "click") => {
       const fail = (stage, error) => ({ via: "native", ok: false, stage, error: error ? String(error) : undefined });
+      // 0.7.4 懒防御：声明阶段失败（如导出缺失）→ 直接报告，不影响动作
+      if (!flashApi) return fail("unavailable", flashApiError);
       try {
         const r = Math.max(4, radius | 0);
         const pad = 4;
@@ -887,9 +903,9 @@ export function createKoffiNative(koffiImpl) {
 
         // 窗口类（进程内一次性注册并缓存）
         if (!native.flashClassAtom) {
-          const inst = GetModuleHandleW("user32.dll");
+          const inst = flashApi.GetModuleHandleW("user32.dll");
           if (!inst) return fail("module");
-          const proc = GetProcAddress(inst, "DefWindowProcW");
+          const proc = flashApi.GetProcAddress(inst, "DefWindowProcW");
           if (!proc) return fail("proc");
           const wc = koffi.alloc(WndClassExW, 1);
           koffi.encode(wc, WndClassExW, {
@@ -906,7 +922,7 @@ export function createKoffiNative(koffiImpl) {
             lpszClassName: FLASH_CLASS_NAME,
             hIconSm: null
           });
-          const atom = RegisterClassExW(wc);
+          const atom = flashApi.RegisterClassExW(wc);
           if (!atom) return fail("class");
           native.flashClassAtom = atom;
           native.flashHinstance = inst;
@@ -916,7 +932,7 @@ export function createKoffiNative(koffiImpl) {
         const WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80;
         const WS_EX_TRANSPARENT = 0x20, WS_EX_LAYERED = 0x80000, WS_EX_NOACTIVATE = 0x8000000;
         const left = Math.round(x - r - pad), top = Math.round(y - r - pad);
-        const hwnd = CreateWindowExW(
+        const hwnd = flashApi.CreateWindowExW(
           WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
           FLASH_CLASS_NAME, "", WS_POPUP, left, top, w, h,
           null, null, native.flashHinstance, null
@@ -951,7 +967,7 @@ export function createKoffiNative(koffiImpl) {
         let dc = null, memDC = null, bmp = null;
         const cleanup = () => {
           const t = setTimeout(() => {
-            try { DestroyWindow(hwnd); } catch { /* ignore */ }
+            try { flashApi.DestroyWindow(hwnd); } catch { /* ignore */ }
             try { if (bmp) DeleteObject(bmp); } catch { /* ignore */ }
             try { if (memDC) DeleteDC(memDC); } catch { /* ignore */ }
             try { if (dc) ReleaseDC(null, dc); } catch { /* ignore */ }
@@ -974,7 +990,7 @@ export function createKoffiNative(koffiImpl) {
           const bits = koffi.alloc(pixelType, 1);
           koffi.encode(bits, pixelType, pixels);
           // 0.7.3 修复：SetDIBits 失败也必须走 cleanup（旧路径泄漏窗口+DC）
-          if (SetDIBits(dc, bmp, 0, h, bits, bmi, 0) === 0) { cleanup(); return fail("setdibits"); }
+          if (flashApi.SetDIBits(dc, bmp, 0, h, bits, bmi, 0) === 0) { cleanup(); return fail("setdibits"); }
 
           const dstPt = koffi.alloc(PointStruct, 1);
           koffi.encode(dstPt, PointStruct, { x: left, y: top });
@@ -986,11 +1002,11 @@ export function createKoffiNative(koffiImpl) {
           koffi.encode(blend, BlendFunction, {
             blendOp: 0, blendFlags: 0, sourceConstantAlpha: 255, alphaFormat: 1 /* AC_SRC_ALPHA */
           });
-          if (!UpdateLayeredWindow(hwnd, null, dstPt, size, memDC, srcPt, 0, blend, 2 /* ULW_ALPHA */)) {
+          if (!flashApi.UpdateLayeredWindow(hwnd, null, dstPt, size, memDC, srcPt, 0, blend, 2 /* ULW_ALPHA */)) {
             cleanup();
             return fail("ulw");
           }
-          ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
+          flashApi.ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
           cleanup();
           return { via: "native", ok: true };
         } catch (error) {
@@ -1004,6 +1020,8 @@ export function createKoffiNative(koffiImpl) {
   };
   native.flashClassAtom = 0;
   native.flashHinstance = null;
+  /** flash 声明失败原因（0.7.4 懒防御；null=声明成功）。doctor 诊断用。 */
+  Object.defineProperty(native, "flashUnavailable", { value: flashApiError, enumerable: true });
   cachedKoffiNative = native;
   return native;
 }
