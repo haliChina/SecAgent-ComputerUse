@@ -97,3 +97,19 @@ test("parseWithOmniParser：缺少截图抛错", async () => {
     /缺少截图/
   );
 });
+
+test("issue #18：server 模板——YOLO 拿权重文件、token 鉴权、文本块不 caption、启动自检", async () => {
+  const { SERVER_PY } = await import("../omniparser/server-template.mjs");
+  // 问题 1（致命）：YOLO 必须拿文件路径，不拿目录（惰性构造=启动假成功）
+  assert.match(SERVER_PY, /_detect = YOLO\(detect_pt\)/, "YOLO 拿权重文件");
+  assert.doesNotMatch(SERVER_PY, /YOLO\(detect_path\)/, "不再传目录");
+  // 启动自检：最小图 predict，把惰性错误当场暴露
+  assert.match(SERVER_PY, /SELF-CHECK FAILED/, "自检失败标记");
+  assert.match(SERVER_PY, /selfcheck/, "/health 报自检结果");
+  // 附带建议：/parse token 鉴权
+  assert.match(SERVER_PY, /--token/, "命令行 token");
+  assert.match(SERVER_PY, /x-secagent-token/, "header 校验");
+  assert.match(SERVER_PY, /unauthorized/, "401 响应");
+  // 附带建议：文本块不再跑 Florence caption（笔误修复+CPU 提速）
+  assert.match(SERVER_PY, /content = _caption\(crop\) if is_icon else ""/, "文本块 content 为空");
+});

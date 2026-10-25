@@ -29,7 +29,8 @@ export async function parseWithOmniParser({
   endpoint = DEFAULT_OMNI_ENDPOINT,
   imageBase64,
   fetchImpl,
-  timeout = 90000
+  timeout = 90000,
+  token
 } = {}) {
   if (!imageBase64) throw new Error("OmniParser 缺少截图");
   const fetchFn = fetchImpl ?? globalThis.fetch;
@@ -41,7 +42,12 @@ export async function parseWithOmniParser({
   try {
     res = await fetchFn(`${endpoint.replace(/\/$/, "")}/parse`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      // 0.7.6：/parse 启动 token 鉴权（本机白嫖防护，issue #18 附带建议）
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(token ? { "x-secagent-token": token } : {})
+      },
       body: JSON.stringify({ image_base64: imageBase64 }),
       signal: ctrl.signal
     });

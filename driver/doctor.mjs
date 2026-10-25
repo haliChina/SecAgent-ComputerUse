@@ -25,7 +25,10 @@ export async function runDoctor(deps = {}) {
     detectPython = null,
     getOmniStatus = null,
     getExtStatus = null,
-    flashProbe = null
+    flashProbe = null,
+    // 0.7.6（issue #18 问题 3）：venv torch CUDA 探测——无 CUDA 的机器 CPU
+    // 推理一屏 8~13 分钟（用户实机实测），报告「不建议启用」。
+    probeCuda = null
   } = deps;
 
   const checks = [];
@@ -180,19 +183,25 @@ export async function runDoctor(deps = {}) {
     }
   }
 
-  // 7) OmniParser 服务状态
+  // 7) OmniParser 服务状态（+ CUDA 探测，issue #18 问题 3）
   if (typeof getOmniStatus === "function") {
     try {
       const st = getOmniStatus() || {};
       const ok = st.phase === "running" || st.phase === "installed";
-      push(
-        "omniparser",
-        "OmniParser 服务",
-        ok,
-        `状态：${st.phase ?? "unknown"}${st.endpoint ? `（${st.endpoint}）` : ""}`,
-        ok ? "" : "在设置控制台一键安装并启动，或填写你自建服务的地址。",
-        true
-      );
+      let detail = `状态：${st.phase ?? "unknown"}${st.endpoint ? `（${st.endpoint}）` : ""}`;
+      let fix = ok ? "" : "在设置控制台一键安装并启动，或填写你自建服务的地址。";
+      if (ok && typeof probeCuda === "function") {
+        try {
+          const cuda = await probeCuda();
+          if (cuda === false) {
+            detail += "；⚠ 无 CUDA（纯 CPU 推理一屏约 8~13 分钟，auto 兜底已自动跳过）";
+            fix = '本机不建议启用 OmniParser：以 backend="uia" 为主，自绘 UI 用 screenshot 目测交叉核对。'; 
+          } else if (cuda === true) {
+            detail += "；CUDA 可用";
+          }
+        } catch { /* 探测失败不影响状态项 */ }
+      }
+      push("omniparser", "OmniParser 服务", ok, detail, fix, true);
     } catch (error) {
       push("omniparser", "OmniParser 服务", false, error?.message ?? String(error), "");
     }

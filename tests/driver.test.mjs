@@ -449,3 +449,40 @@ test("inspect UIA 失败且无元素时，输出带失败原因与出路（不�
   assert.match(out, /doctor/);
   assert.match(out, /omniparser/);
 });
+
+test("issue #18 问题 3：auto 模式无 CUDA 时跳过 OmniParser 兜底（不白等 90s）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  let parseCalled = 0;
+  const fetchImpl = async () => { parseCalled += 1; return { ok: true, json: async () => ({ parsed_content_list: [] }) }; };
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner([]), // 0 元素 < minElements(3)，auto 本会触发 OmniParser
+    omniEndpoint: "http://127.0.0.1:8000",
+    configProvider: () => ({ backend: "auto", omniEnabled: true, omniEndpoint: "http://127.0.0.1:8000", minElements: 3 }),
+    fetchImpl,
+    probeCuda: async () => false
+  });
+  const out = await driver.inspect();
+  assert.equal(parseCalled, 0, "未发起 /parse 请求（CUDA 门拦截）");
+  assert.match(out, /已自动跳过/, "返回里说明跳过原因");
+  assert.match(out, /backend="uia"/, "给出替代建议");
+  // 有 CUDA 时正常走 OmniParser（token 一并带上）
+  let seenHeaders = null;
+  const fetch2 = async (url, init) => {
+    parseCalled += 1;
+    seenHeaders = init?.headers || {};
+    return { ok: true, json: async () => ({ parsed_content_list: [] }) };
+  };
+  const driver2 = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner([]),
+    omniEndpoint: "http://127.0.0.1:8000",
+    configProvider: () => ({ backend: "auto", omniEnabled: true, omniEndpoint: "http://127.0.0.1:8000", minElements: 3 }),
+    fetchImpl: fetch2,
+    probeCuda: async () => true,
+    omniTokenProvider: () => "tok-123"
+  });
+  await driver2.inspect();
+  assert.equal(parseCalled, 1, "有 CUDA 时发起 /parse");
+  assert.equal(seenHeaders["x-secagent-token"], "tok-123", "请求带鉴权 token");
+});
