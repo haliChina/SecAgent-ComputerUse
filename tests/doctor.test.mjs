@@ -94,3 +94,25 @@ test("屏幕探针读到非法尺寸则失败", async () => {
   assert.equal(screen.ok, false);
   assert.equal(r.ok, false);
 });
+
+test("issue #18 问题 3：doctor 报告无 CUDA 机器不建议启用 OmniParser", async () => {
+  const { runDoctor } = await import("../driver/doctor.mjs");
+  const r = await runDoctor({
+    platform: "win32",
+    loadNative: () => ({}),
+    getOmniStatus: () => ({ phase: "running", endpoint: "http://127.0.0.1:8000" }),
+    probeCuda: async () => false
+  });
+  const omni = r.checks.find((c) => c.id === "omniparser");
+  assert.ok(omni, "omniparser 检查项存在");
+  assert.match(omni.detail, /无 CUDA/, "detail 标注无 CUDA");
+  assert.match(omni.fix, /不建议启用/, "fix 给出建议");
+  // 有 CUDA 时报告可用
+  const r2 = await runDoctor({
+    platform: "win32",
+    loadNative: () => ({}),
+    getOmniStatus: () => ({ phase: "running", endpoint: "http://127.0.0.1:8000" }),
+    probeCuda: async () => true
+  });
+  assert.match(r2.checks.find((c) => c.id === "omniparser").detail, /CUDA 可用/);
+});

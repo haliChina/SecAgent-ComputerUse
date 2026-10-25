@@ -82,7 +82,11 @@ export async function activate(api) {
     hostFlash:
       typeof api.flashMarker === "function"
         ? (x, y, opts) => api.flashMarker(x, y, opts)
-        : null
+        : null,
+    // 0.7.6（issue #18）：/parse 鉴权 token + CUDA 探测（manager 在下方创建，
+    // 闭包延迟取用——driver 动作都发生在 activate 完成之后，届时已初始化）。
+    omniTokenProvider: () => manager.getToken?.() || undefined,
+    probeCuda: () => manager.probeCuda?.()
   });
 
   // OmniParser 一键安装管理器（数据在用户主目录，不随插件包分发）。
@@ -206,6 +210,8 @@ export async function activate(api) {
         detectPython: () => manager.detectPython(),
         getOmniStatus: () => manager.status(),
         getExtStatus: () => extBridge.status(),
+        // issue #18 问题 3：doctor 报告无 CUDA 机器不建议启用 OmniParser
+        probeCuda: async () => await manager.probeCuda(),
         // 发光标记自检：屏幕中心真实闪一次，报告走哪条通道（host/native/off）
         flashProbe: async () => await driver.flashAt(960, 540, "focus", 18)
       });

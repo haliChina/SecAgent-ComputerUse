@@ -510,3 +510,78 @@ test("已配置镜像仍断连：提示换源与续传，而不是让用户再�
     return true;
   });
 });
+
+// ---- issue #18（0.7.6）：升级重写 server.py + /parse token 鉴权 + CUDA 探测 ----
+
+test("issue #18 问题 2：start() 发现 server.py 与模板不一致时备份并重写 + 传 --token", async () => {
+  const baseDir = tmpDir();
+  const tmpl = await import("../omniparser/server-template.mjs");
+  const spawnCalls = [];
+  const spawnImpl = (cmd, args, opts) => {
+    spawnCalls.push({ cmd, args, opts });
+    return { pid: 4321, on() {}, stdout: null, stderr: null, kill() {} };
+  };
+  const fetchImpl = async (url) => ({ ok: true, json: async () => ({ status: "ok" }) });
+  const manager = createOmniParserManager({
+    baseDir, spawnImpl, fetchImpl, serverTemplate: tmpl.SERVER_PY, log() {}
+  });
+  // 模拟 0.7.1 → 0.7.6 升级场景：旧版慢参数/带 YOLO 目录 bug 的 server.py 驻留
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(path.join(baseDir, "server.py"), "# old\nYOLO(detect_path)\n", "utf8");
+  fs.writeFileSync(path.join(baseDir, "installed.json"), JSON.stringify({ installedAt: "2026-01-01T00:00:00Z" }), "utf8");
+  await manager.start();
+  const after = fs.readFileSync(path.join(baseDir, "server.py"), "utf8");
+  assert.equal(after, tmpl.SERVER_PY, "server.py 已按当前模板重写");
+  const bak = fs.readdirSync(baseDir).find((f) => /^server\.py\.bak-/.test(f));
+  assert.ok(bak, "旧文件已备份");
+  assert.match(fs.readFileSync(path.join(baseDir, bak), "utf8"), /YOLO\(detect_path\)/, "备份的是旧内容");
+  const marker = JSON.parse(fs.readFileSync(path.join(baseDir, "installed.json"), "utf8"));
+  assert.ok(marker.templateVersion, "installed.json 记录模板版本");
+  // 附带建议：spawn 带随机 --token（manager 生成，重启即换）
+  const tokenIdx = spawnCalls[0].args.indexOf("--token");
+  assert.ok(tokenIdx >= 0, "spawn 传 --token");
+  assert.match(spawnCalls[0].args[tokenIdx + 1], /^[0-9a-f-]{36}$/, "token 是 UUID");
+  assert.ok(manager.getToken(), "getToken 暴露给 driver 侧");
+});
+
+test("issue #18 附带：模板已一致时 start() 不重写（幂等，不误伤用户改动场景外文件）", async () => {
+  const baseDir = tmpDir();
+  const tmpl = await import("../omniparser/server-template.mjs");
+  let spawnCount = 0;
+  const manager = createOmniParserManager({
+    baseDir,
+    spawnImpl: () => { spawnCount += 1; return { pid: 1, on() {}, stdout: null, stderr: null, kill() {} }; },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ status: "ok" }) }),
+    serverTemplate: tmpl.SERVER_PY, log() {}
+  });
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(path.join(baseDir, "server.py"), tmpl.SERVER_PY, "utf8");
+  fs.writeFileSync(path.join(baseDir, "installed.json"), "{}", "utf8");
+  const mtime = fs.statSync(path.join(baseDir, "server.py")).mtimeMs;
+  await manager.start();
+  assert.equal(fs.statSync(path.join(baseDir, "server.py")).mtimeMs, mtime, "一致时不动文件");
+  assert.equal(fs.readdirSync(baseDir).filter((f) => /^server\.py\.bak-/.test(f)).length, 0, "不产生备份");
+  assert.equal(spawnCount, 1);
+});
+
+test("probeCuda：torch 输出 0/1 映射 false/true，异常/null 为未知", async () => {
+  const baseDir = tmpDir();
+  const binDir = path.join(baseDir, process.platform === "win32" ? "venv\\Scripts" : "venv/bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const vpy = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
+  fs.writeFileSync(vpy, "#!/bin/sh\n", "utf8");
+  for (const [out, expect] of Object.entries({ "0": false, "1": true })) {
+    const manager = createOmniParserManager({
+      baseDir,
+      spawnImpl: (_cmd, args) => ({
+        stdout: { on: (ev, cb) => { if (ev === "data" && String(args[1]).includes("torch")) cb(out + "\n"); } },
+        on: (ev, cb) => { if (ev === "close") cb(0); }
+      }),
+      fetchImpl: async () => ({ ok: true }), serverTemplate: "", log() {}
+    });
+    assert.equal(await manager.probeCuda(), expect, `torch=${out} → ${expect}`);
+  }
+  // venv 不存在 → null（未知，不拦截）
+  const manager2 = createOmniParserManager({ baseDir: tmpDir(), fetchImpl: async () => ({ ok: true }), serverTemplate: "", log() {} });
+  assert.equal(await manager2.probeCuda(), null);
+});

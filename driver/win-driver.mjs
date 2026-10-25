@@ -82,7 +82,11 @@ export class WindowsDriver {
     maxSidePixels = 0,
     configProvider,
     extBridge = null,
-    hostFlash = null
+    hostFlash = null,
+    // 0.7.6（issue #18 问题 3）：/parse 鉴权 token 提供者 + CUDA 探测器（均由
+    // main.mjs 注入 manager 的实现；缺省=不鉴权/不拦截，兼容旧宿主与自建服务）。
+    omniTokenProvider = null,
+    probeCuda = null
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
@@ -98,12 +102,28 @@ export class WindowsDriver {
     this.maxSidePixels = maxSidePixels;
     this.configProvider = typeof configProvider === "function" ? configProvider : null;
     this.hostFlash = typeof hostFlash === "function" ? hostFlash : null;
+    this.omniTokenProvider = typeof omniTokenProvider === "function" ? omniTokenProvider : null;
+    this.probeCuda = typeof probeCuda === "function" ? probeCuda : null;
+    /** CUDA 探测缓存：null=未探测（或不可探测），true=可用，false=纯 CPU。 */
+    this.cudaOk = null;
     /** 最近一次发光标记的诊断（doctor 可查：via/ok/stage）。 */
     this.lastFlash = null;
     this.#lastMap = { elements: [], total: 0, truncated: false, source: "uia" };
   }
 
   #lastMap;
+
+  /** CUDA 门：探测一次并缓存。null=不可探测/未知（不拦截），true/false=探测结果。 */
+  async #cudaGate() {
+    if (this.cudaOk !== null) return this.cudaOk;
+    if (!this.probeCuda) return null;
+    try {
+      this.cudaOk = await this.probeCuda();
+    } catch {
+      this.cudaOk = null;
+    }
+    return this.cudaOk;
+  }
 
   /** 当前生效设置：优先 configProvider，否则回退构造时的固定字段。 */
   #cfg() {
@@ -354,9 +374,18 @@ export class WindowsDriver {
 
     // 仅在显式启用 OmniParser 时提供该后端地址。
     const omniEndpoint = cfg.omniEnabled ? cfg.omniEndpoint : undefined;
+    // issue #18 问题 3：auto 兜底先过 CUDA 门——无 CUDA 的 CPU 推理一屏 8~13 分钟
+    // （用户实机实测），白等 90s 超时后 agent 退化成裸坐标。显式 backend="omniparser"
+    // 不拦（模型点名要它）；auto 静默跳过并在结果里说明。
+    const autoWantsOmni = useBackend === "auto" && map && map.total < cfg.minElements && omniEndpoint;
+    const cudaNote = { skipped: false };
+    if (autoWantsOmni && await this.#cudaGate() === false) {
+      cudaNote.skipped = true;
+      cudaNote.reason = "无 CUDA（纯 CPU 推理一屏约 8~13 分钟，已自动跳过 OmniParser 兜底）";
+    }
     const needOmni =
       useBackend === "omniparser" ||
-      (useBackend === "auto" && map && map.total < cfg.minElements && omniEndpoint);
+      (autoWantsOmni && !cudaNote.skipped);
     let omniError = null;
     if (needOmni) {
       const imageBase64 = encodePNG(capture).toString("base64");
@@ -365,7 +394,8 @@ export class WindowsDriver {
           endpoint: omniEndpoint,
           imageBase64,
           fetchImpl: this.fetchImpl,
-          timeout: cfg.omniTimeoutMs
+          timeout: cfg.omniTimeoutMs,
+          token: this.omniTokenProvider?.() || undefined
         });
         const om = buildElementMap(detections, "omniparser", {
           cap: cfg.maxElements,
@@ -406,6 +436,9 @@ export class WindowsDriver {
       (omniError
         ? `\n⚠ OmniParser 兜底未生效（auto 模式已降级为 UIA 结果）：${omniError.message}。` +
           `界面为自绘 UI 时元素可能偏少，坐标请配合 screenshot 目测交叉核对。`
+        : "") +
+      (cudaNote.skipped
+        ? `\n⚠ ${cudaNote.reason}。本机建议以 backend="uia" 为主，配合 screenshot 目测。`
         : "");
     // 扩展元素来自某个标签页：把标签页上下文写给模型（点错窗口/标签是高频翻车点）。
     const tabLine =

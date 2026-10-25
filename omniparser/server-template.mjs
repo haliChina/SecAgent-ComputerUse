@@ -61,6 +61,9 @@ def _patch_local_automap():
         except Exception:
             pass  # 配置不可读/不可写不挡启动，交给后续报错分诊
 
+_AUTH = {"token": None}
+_SELF_CHECK = {"ok": None, "error": None}
+
 def _load():
     global _torch, _detect, _cap_model, _cap_proc
     if _detect is not None:
@@ -79,7 +82,9 @@ def _load():
             if os.path.exists(cand):
                 detect_pt = cand
                 break
-    _detect = YOLO(detect_path)
+    # issue #18 问题 1：YOLO 必须拿权重文件路径——传目录是惰性构造，
+    # 启动「假成功」，第一次 /parse 才在 predict 阶段 500。
+    _detect = YOLO(detect_pt)
     cap_path = os.path.join(WEIGHTS_DIR, "icon_caption_florence")
     _cap_proc = AutoProcessor.from_pretrained(cap_path, trust_remote_code=True)
     _cap_model = AutoModelForCausalLM.from_pretrained(
@@ -136,7 +141,10 @@ def parse_image(pil_img, conf=0.05):
         crop = pil_img.crop((int(x1), int(y1), int(x2), int(y2)))
         # OmniParser icon_detect：0 通常为可交互 icon，1 为文本区域
         is_icon = cls == 0
-        content = _caption(crop) if is_icon else _caption(crop)
+        # issue #18 附带：旧代码两分支相同（笔误）。文本块不需要 Florence
+        # caption（icon 检测的 caption 语义只对 icon 有意义）——跳过它，
+        # CPU 场景一屏几十个文本块的时间直接省掉。
+        content = _caption(crop) if is_icon else ""
         parsed_list.append({
             "type": "icon" if is_icon else "text",
             "bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
@@ -147,16 +155,24 @@ def parse_image(pil_img, conf=0.05):
     return parsed_list, {"width": w, "height": h}
 
 def create_app():
-    from fastapi import FastAPI, UploadFile, File, Form
+    from fastapi import FastAPI, Request, UploadFile, File, Form
     from fastapi.responses import JSONResponse
     app = FastAPI(title="SecAgent OmniParser")
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "time": int(time.time())}
+        return {"status": "ok", "time": int(time.time()), "selfcheck": dict(_SELF_CHECK)}
 
     @app.post("/parse")
-    async def parse(file: UploadFile = File(default=None), base64: str = Form(default=None)):
+    async def parse(request: Request, file: UploadFile = File(default=None), base64: str = Form(default=None)):
+        if _AUTH["token"]:
+            supplied = None
+            try:
+                supplied = request.headers.get("x-secagent-token") or request.query_params.get("token")
+            except Exception:
+                supplied = None
+            if supplied != _AUTH["token"]:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
         from PIL import Image
         raw = b""
         if file is not None:
@@ -179,9 +195,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    # 0.7.6：/parse 鉴权 token（manager 启动时随机生成经命令行传入；缺省=不鉴权，
+    # 兼容用户自建的老服务）。/health 保持无鉴权（本机存活探测无敏感信息）。
+    parser.add_argument("--token", default=None)
     args = parser.parse_args()
+    _AUTH["token"] = args.token
     print("loading OmniParser models ...", flush=True)
     _load()
-    print("models ready", flush=True)
+    # issue #18 问题 1：启动自检——最小图 predict 一次，把「加载假成功」当场暴露
+    # （YOLO 传错路径这类惰性错误只有 predict 才炸）。自检失败不退出，/health
+    # 带 selfcheck 结果供 doctor/manager 分诊。
+    try:
+        from PIL import Image as _Img
+        _probe = _Img.new("RGB", (64, 64), (255, 255, 255))
+        _detect.predict(_probe, verbose=False)
+        _SELF_CHECK.update({"ok": True, "error": None})
+        print("models ready (self-check ok)", flush=True)
+    except Exception as _sc_err:
+        _SELF_CHECK.update({"ok": False, "error": str(_sc_err)})
+        print(f"SELF-CHECK FAILED: {_sc_err}", flush=True)
+        print("models loaded but PREDICT WILL FAIL - see /health selfcheck", flush=True)
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
 `;

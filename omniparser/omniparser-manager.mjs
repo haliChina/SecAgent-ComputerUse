@@ -3,6 +3,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { spawn as defaultSpawn } from "node:child_process";
 import { Readable, Transform } from "node:stream";
@@ -62,6 +63,8 @@ function defaultExec(cmd, args, opts = {}) {
 }
 
 
+export const TEMPLATE_VERSION = "0.7.6";
+
 export function createOmniParserManager(options = {}) {
   const baseDir = options.baseDir || path.join(os.homedir(), ".secagent", "computer-use", "omniparser");
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
@@ -86,6 +89,9 @@ export function createOmniParserManager(options = {}) {
   let progress = 0;
   let child = null;
   let intentionalStop = false;
+  // 0.7.6：本次启动生成的 /parse 鉴权 token（issue #18 附带建议——本地端口无鉴权
+  // 会被本机任意进程白嫖推理）。随子进程命令行传入，重启即换。
+  let serverToken = null;
 
   function venvPython() {
     return isWin
@@ -105,6 +111,32 @@ export function createOmniParserManager(options = {}) {
   // 预编译包；3.13+ 上 pip 找不到 wheel 会退回源码编译，无 C 编译器的机器必败
   // （实机：clang-cl / pgcc 都找不到 → metadata-generation-failed）。
   // 3.13+ 的解释器记录在 tooNew 里用于报错指引，不直接采用。
+  function getToken() {
+    return serverToken;
+  }
+
+  /** issue #18 问题 3：探测 venv torch 的 CUDA 可用性。
+   * @returns {Promise<boolean|null>} true=有 CUDA；false=纯 CPU（OmniParser 无实用价值）；
+   *   null=torch 未装或探测失败（按未知处理，不拦截）。 */
+  async function probeCuda() {
+    try {
+      if (!fs.existsSync(venvPython())) return null;
+      const r = await new Promise((resolve) => {
+        const ch = spawnImpl(venvPython(), ["-c", "import torch;print(int(torch.cuda.is_available()))"], { windowsHide: true });
+        let out = "";
+        ch.stdout?.on("data", (d) => { out += d; });
+        ch.on?.("error", () => resolve(""));
+        ch.on?.("close", () => resolve(out.trim()));
+      });
+      const v = String(r).trim();
+      if (v === "1") return true;
+      if (v === "0") return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   async function detectPython() {
     const candidates = isWin
       ? [["py", "-3.11"], ["py", "-3.12"], ["py", "-3.10"], ["python"], ["python3"]]
@@ -414,12 +446,37 @@ export function createOmniParserManager(options = {}) {
     if ((phase === "running" || phase === "starting") && child) return;
     if (!fs.existsSync(markerFile)) throw new Error("尚未安装 OmniParser");
     const url = new URL(endpoint);
+    // issue #18 问题 2：升级插件后旧 server.py 一直驻留（installed.json 无模板版本，
+    // start() 也不重写）——0.7.1 升 0.7.5 后用户还在跑带 YOLO 目录 bug/慢参数的旧服务。
+    // 修：每次 start 对比磁盘 server.py 与当前模板，不一致即备份旧文件并重写。
+    if (serverTemplate) {
+      const current = fs.existsSync(serverFile) ? fs.readFileSync(serverFile, "utf8") : "";
+      if (current !== serverTemplate) {
+        if (current) {
+          const backup = path.join(baseDir, `server.py.bak-${Date.now()}`);
+          try { fs.copyFileSync(serverFile, backup); } catch { /* 备份失败不挡升级 */ }
+          log(`server.py 与当前模板不一致，已重写（旧文件备份为 ${path.basename(backup)}）`);
+        } else {
+          log("server.py 缺失，已按当前模板写入");
+        }
+        fs.writeFileSync(serverFile, serverTemplate, "utf8");
+        try {
+          const marker = fs.existsSync(markerFile)
+            ? JSON.parse(fs.readFileSync(markerFile, "utf8") || "{}")
+            : {};
+          marker.templateVersion = TEMPLATE_VERSION;
+          marker.rewrittenAt = new Date().toISOString();
+          fs.writeFileSync(markerFile, JSON.stringify(marker, null, 2), "utf8");
+        } catch { /* installed.json 更新失败不挡启动 */ }
+      }
+    }
+    serverToken = randomUUID();
     setPhase("starting", "启动本地服务（首次加载模型较慢）…");
     intentionalStop = false;
     const vpy = venvPython();
     const hfMirror = String(getHfMirror() || "").trim();
     child = spawnImpl(vpy,
-      [serverFile, "--host", url.hostname, "--port", url.port || "8000"],
+      [serverFile, "--host", url.hostname, "--port", url.port || "8000", "--token", serverToken],
       {
         cwd: baseDir,
         env: {
@@ -491,7 +548,7 @@ export function createOmniParserManager(options = {}) {
 
   return {
     install, start, stop, uninstall, status,
-    detectPython, healthOnce, setEndpoint,
+    detectPython, healthOnce, setEndpoint, getToken, probeCuda,
     get phase() { return phase; }
   };
 }
