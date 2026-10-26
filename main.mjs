@@ -209,6 +209,27 @@ export async function activate(api) {
         probeCuda: async () => await manager.probeCuda(),
         // 发光标记自检：屏幕中心真实闪一次，报告走哪条通道（host/native/off）
         flashProbe: async () => await driver.flashAt(960, 540, "focus", 18),
+        // 0.8.2 五形态实测：依次真实闪五种光效（间隔约 1 秒），肉眼对照——
+        // 旋转红环=click、蓝胶囊=type、键帽=chord、紫箭头=scroll、琥珀环=focus。
+        flashShapes: async () => {
+          const seq = [
+            { kind: "click", label: null },
+            { kind: "type", label: null },
+            { kind: "chord", label: "Ctrl+S" },
+            { kind: "scroll", label: null, direction: -1 },
+            { kind: "focus", label: null }
+          ];
+          const out = [];
+          for (const it of seq) {
+            const extra = {};
+            if (it.label) extra.label = it.label;
+            if (it.direction != null) extra.direction = it.direction;
+            const r = await driver.flashAt(960, 540, it.kind, it.kind === "focus" ? 18 : 13, extra);
+            out.push({ kind: it.kind, via: r?.via, ok: r?.ok });
+            await new Promise((resolve) => setTimeout(resolve, 1050));
+          }
+          return out;
+        },
         // 0.8.1 徽标自检：真实 touch 一次（宿主右下角显示 8 秒）
         badgeProbe: () => driver.touchActivity()
       });

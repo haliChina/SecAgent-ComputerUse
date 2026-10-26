@@ -215,9 +215,10 @@ export class WindowsDriver {
     return (this.lastFlash = { via: "none", ok: false, reason: "无可用通道（非 Windows 或无 koffi native）" });
   }
 
-  /** 公开落点发光（物理坐标直闪）：focus 等系统级操作成功后由 main.mjs 调用。 */
-  async flashAt(x, y, kind = "focus", radius = 13) {
-    return await this.#flash({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }, kind, radius);
+  /** 公开落点发光（物理坐标直闪）：focus 等系统级操作成功后由 main.mjs 调用。
+   * extra：chord 的 label / scroll 的 direction 等（透传宿主）。 */
+  async flashAt(x, y, kind = "focus", radius = 13, extra = null) {
+    return await this.#flash({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }, kind, radius, extra);
   }
 
   /** 0.8.1：touch 宿主「正在操作电脑」徽标（active=true 续期；active=false 隐藏）。
