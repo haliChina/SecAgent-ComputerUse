@@ -26,6 +26,9 @@ export async function runDoctor(deps = {}) {
     getOmniStatus = null,
     getExtStatus = null,
     flashProbe = null,
+    // 0.8.2：五形态序列实测——依次真实闪 click/type/chord/scroll/focus
+    //（间隔约 1 秒），用户肉眼对照定位渲染层问题（缺哪种=哪种挂）。
+    flashShapes = null,
     // 0.8.1：徽标探测——真实 touch 一次，宿主右下角显示 8 秒。
     badgeProbe = null,
     // 0.7.6（issue #18 问题 3）：venv torch CUDA 探测——无 CUDA 的机器 CPU
@@ -138,12 +141,18 @@ export async function runDoctor(deps = {}) {
       const r = await flashProbe();
       // via=host：宿主透明窗通道（推荐，视觉质感最好）；native：koffi
       // 分层窗口兜底（0.7.1/0.7.2 实机曾不可见——宿主通道才是可见性保证）
+      // 0.8.2：附带五形态序列实测（依次真实闪 click/type/chord/scroll/focus，
+      // 用户肉眼对照——缺哪种形态=哪种渲染挂；全见=通道与形态都正常）
+      const shapes = typeof flashShapes === "function" ? await flashShapes() : null;
+      const shapeNote = shapes?.length
+        ? `；五形态实测已依次闪出（${shapes.map((x) => x.kind).join("→")}），请对照刚才屏幕：旋转红环=click、蓝胶囊=type、键帽=chord、紫箭头=scroll、琥珀环=focus，缺哪个报哪个`
+        : "";
       push(
         "flash",
         "操作发光标记",
         r?.via === "host",
         r?.via === "host"
-          ? "宿主 api.flashMarker 通道正常（点击/输入/聚焦/滚动落点发光）"
+          ? `宿主 api.flashMarker 通道正常（点击/输入/聚焦/滚动落点发光）${shapeNote}`
           : r?.via === "native"
             ? `走 koffi 兜底通道（${r?.ok ? "调用成功" : `失败于 ${r?.stage ?? "未知阶段"}`}）——宿主版本过旧无 api.flashMarker。兜底通道在部分机器上不可见（0.7.1/0.7.2 已知），建议升级宿主`
             : r?.via === "off"

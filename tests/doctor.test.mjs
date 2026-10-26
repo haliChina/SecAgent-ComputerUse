@@ -116,3 +116,36 @@ test("issue #18 问题 3：doctor 报告无 CUDA 机器不建议启用 OmniParse
   });
   assert.match(r2.checks.find((c) => c.id === "omniparser").detail, /CUDA 可用/);
 });
+
+test("0.8.2 五形态实测：flashShapes 依次闪五种并报告序列（doctor 肉眼对照）", async () => {
+  const { runDoctor } = await import("../driver/doctor.mjs");
+  const flashed = [];
+  const r = await runDoctor({
+    platform: "win32",
+    loadNative: () => ({}),
+    flashProbe: async () => ({ via: "host", ok: true }),
+    flashShapes: async () => {
+      for (const k of ["click", "type", "chord", "scroll", "focus"]) flashed.push(k);
+      return flashed.map((kind) => ({ kind, via: "host", ok: true }));
+    }
+  });
+  assert.deepEqual(flashed, ["click", "type", "chord", "scroll", "focus"], "依次五形态");
+  const item = r.checks.find((c) => c.id === "flash");
+  assert.match(item.detail, /五形态实测/, "报告含五形态说明");
+  assert.match(item.detail, /蓝胶囊|键帽|紫箭头/, "含对照提示");
+});
+
+test("0.8.2 flashAt 透传 extra（chord label / scroll direction）", async () => {
+  const { WindowsDriver } = await import("../driver/win-driver.mjs");
+  const seen = [];
+  const native = { cursorPos: () => ({ x: 10, y: 10 }) };
+  const driver = new WindowsDriver({
+    native,
+    configProvider: () => ({}),
+    hostFlash: (x, y, opts) => seen.push({ x, y, opts })
+  });
+  await driver.flashAt(10, 10, "chord", 12, { label: "Ctrl+S" });
+  await driver.flashAt(10, 10, "scroll", 10, { direction: -1 });
+  assert.deepEqual(seen[0].opts, { kind: "chord", radius: 12, label: "Ctrl+S" });
+  assert.deepEqual(seen[1].opts, { kind: "scroll", radius: 10, direction: -1 });
+});
