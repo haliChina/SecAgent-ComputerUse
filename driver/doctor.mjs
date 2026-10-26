@@ -26,6 +26,8 @@ export async function runDoctor(deps = {}) {
     getOmniStatus = null,
     getExtStatus = null,
     flashProbe = null,
+    // 0.8.1：徽标探测——真实 touch 一次，宿主右下角显示 8 秒。
+    badgeProbe = null,
     // 0.7.6（issue #18 问题 3）：venv torch CUDA 探测——无 CUDA 的机器 CPU
     // 推理一屏 8~13 分钟（用户实机实测），报告「不建议启用」。
     probeCuda = null
@@ -154,6 +156,25 @@ export async function runDoctor(deps = {}) {
       );
     } catch (error) {
       push("flash", "操作发光标记", false, error?.message ?? String(error), "", true);
+    }
+  }
+
+  // 5.5) 常驻活动徽标（0.8.1，对齐 ZCode 使用中标识）
+  if (typeof badgeProbe === "function") {
+    try {
+      const r = badgeProbe() || {};
+      push(
+        "activity-badge",
+        "「正在操作电脑」常驻徽标",
+        r.via === "host",
+        r.via === "host"
+          ? "宿主 api.agentActivity 通道正常（动作期间右下角常驻显示，空闲 8 秒自动隐藏）"
+          : "宿主版本过旧无 api.agentActivity——升级宿主后，插件动作期间右下角会常驻显示「SecAgent 正在操作电脑」标识",
+        r.via === "host" ? "" : "升级 SecAgent 宿主（含 agentActivity 徽标的版本）。",
+        true
+      );
+    } catch (error) {
+      push("activity-badge", "「正在操作电脑」常驻徽标", false, error?.message ?? String(error), "", true);
     }
   }
 

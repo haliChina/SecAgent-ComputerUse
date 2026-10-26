@@ -75,7 +75,13 @@ export async function activate(api) {
     // 0.7.6（issue #18）：/parse 鉴权 token + CUDA 探测（manager 在下方创建，
     // 闭包延迟取用——driver 动作都发生在 activate 完成之后，届时已初始化）。
     omniTokenProvider: () => manager.getToken?.() || undefined,
-    probeCuda: () => manager.probeCuda?.()
+    probeCuda: () => manager.probeCuda?.(),
+    // 0.8.1：宿主常驻「正在操作电脑」徽标（对齐 ZCode 使用中标识）。
+    // 旧宿主无 api.agentActivity 时注入 null（doctor 会提示升宿主）。
+    hostActivity:
+      typeof api.agentActivity === "function"
+        ? (input) => api.agentActivity(input)
+        : null
   });
 
   // OmniParser 一键安装管理器（数据在用户主目录，不随插件包分发）。
@@ -202,7 +208,9 @@ export async function activate(api) {
         // issue #18 问题 3：doctor 报告无 CUDA 机器不建议启用 OmniParser
         probeCuda: async () => await manager.probeCuda(),
         // 发光标记自检：屏幕中心真实闪一次，报告走哪条通道（host/native/off）
-        flashProbe: async () => await driver.flashAt(960, 540, "focus", 18)
+        flashProbe: async () => await driver.flashAt(960, 540, "focus", 18),
+        // 0.8.1 徽标自检：真实 touch 一次（宿主右下角显示 8 秒）
+        badgeProbe: () => driver.touchActivity()
       });
       return {
         ok: result.ok,
@@ -383,6 +391,7 @@ export async function activate(api) {
     guarded("focus", async (a) => {
       if (typeof a.title !== "string" || !a.title.trim())
         throw new Error("focus 需要非空 title（窗口标题正则）");
+      driver.touchActivity(); // 切窗口也是操作
       const res = await focusWindow({ title: a.title, timeout: readConfig().uiaTimeoutMs });
       // 聚焦落点发光（0.7.3，用户要求）：目标窗口中心闪琥珀色标记——
       // 用户肉眼可循 Agent 的焦点切换轨迹。无碍失败。
@@ -413,6 +422,7 @@ export async function activate(api) {
         throw new Error("launch 需要非空 command");
       if (a.args != null && !Array.isArray(a.args))
         throw new Error("launch 的 args 必须是字符串数组");
+      driver.touchActivity(); // 启动应用也是「正在操作电脑」
       return launchApp({ command: a.command, args: a.args ?? [] });
     })
   );
