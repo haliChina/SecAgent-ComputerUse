@@ -486,3 +486,53 @@ test("issue #18 问题 3：auto 模式无 CUDA 时跳过 OmniParser 兜底（不
   assert.equal(parseCalled, 1, "有 CUDA 时发起 /parse");
   assert.equal(seenHeaders["x-secagent-token"], "tok-123", "请求带鉴权 token");
 });
+
+test("0.8.1 徽标：动作 touch 宿主 agentActivity（独立于发光开关），无通道时 doctor 可诊断", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const activityCalls = [];
+  // 发光关着，徽标仍要 touch（状态指示≠视觉特效）
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: uiaRunner(uiaEls),
+    configProvider: () => ({ backend: "auto", actionFlash: false }),
+    hostActivity: (input) => activityCalls.push({ ...input })
+  });
+  await driver.inspect(); // 建元素地图（elementId 依赖最近一次 inspect）
+  await driver.clickTarget({ elementId: 0 }); // click(位置参数) 转发到 clickTarget
+  assert.equal(activityCalls.length, 1, "click 触发一次徽标 touch");
+  assert.deepEqual(activityCalls[0], { active: true });
+  // active=false（会话结束）路径
+  driver.touchActivity(false);
+  assert.equal(activityCalls.length, 2);
+  assert.equal(activityCalls[1].active, false);
+  // 无 hostActivity：不抛错、诊断可查（doctor 的 badgeProbe 用）
+  const driver2 = new WindowsDriver({ native });
+  const r = driver2.touchActivity();
+  assert.equal(r.via, "none");
+  assert.match(r.reason, /agentActivity/);
+  // flashProbe 关闭时 lastFlash=off，但徽标已 touch（互不干扰）
+  const lf = await driver.flashAt(10, 10);
+  assert.equal(lf.via, "off");
+  assert.equal(activityCalls.length >= 3, true, "flashAt 也 touch 徽标");
+});
+
+test("0.8.1 doctor：activity-badge 检查项（有通道报正常/无通道报升宿主）", async () => {
+  const { runDoctor } = await import("../driver/doctor.mjs");
+  const r = await runDoctor({
+    platform: "win32",
+    loadNative: () => ({}),
+    badgeProbe: () => ({ via: "host", ok: true })
+  });
+  const item = r.checks.find((c) => c.id === "activity-badge");
+  assert.ok(item, "检查项存在");
+  assert.equal(item.ok, true);
+  assert.match(item.detail, /常驻显示/, "报通道正常");
+  const r2 = await runDoctor({
+    platform: "win32",
+    loadNative: () => ({}),
+    badgeProbe: () => ({ via: "none", ok: false, reason: "宿主无 api.agentActivity（版本过旧）" })
+  });
+  const item2 = r2.checks.find((c) => c.id === "activity-badge");
+  assert.equal(item2.ok, false);
+  assert.match(item2.fix, /升级/);
+});

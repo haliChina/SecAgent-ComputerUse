@@ -86,7 +86,10 @@ export class WindowsDriver {
     // 0.7.6（issue #18 问题 3）：/parse 鉴权 token 提供者 + CUDA 探测器（均由
     // main.mjs 注入 manager 的实现；缺省=不鉴权/不拦截，兼容旧宿主与自建服务）。
     omniTokenProvider = null,
-    probeCuda = null
+    probeCuda = null,
+    // 0.8.1：宿主常驻「正在操作电脑」徽标通道（api.agentActivity）。
+    // 独立于 actionFlash 开关——徽标是状态指示不是视觉特效。
+    hostActivity = null
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
@@ -104,6 +107,9 @@ export class WindowsDriver {
     this.hostFlash = typeof hostFlash === "function" ? hostFlash : null;
     this.omniTokenProvider = typeof omniTokenProvider === "function" ? omniTokenProvider : null;
     this.probeCuda = typeof probeCuda === "function" ? probeCuda : null;
+    this.hostActivity = typeof hostActivity === "function" ? hostActivity : null;
+    /** 徽标通道诊断（doctor 可查）。 */
+    this.lastActivity = null;
     /** CUDA 探测缓存：null=未探测（或不可探测），true=可用，false=纯 CPU。 */
     this.cudaOk = null;
     /** 最近一次发光标记的诊断（doctor 可查：via/ok/stage）。 */
@@ -184,6 +190,7 @@ export class WindowsDriver {
    * @returns {Promise<{via:string,ok:boolean,stage?:string,error?:string}>}
    */
   async #flash(abs, kind = "click", radius = 13, extra = null) {
+    this.touchActivity(); // 徽标随动作 touch（独立于发光开关）
     const cfg = this.#cfg();
     if (cfg.actionFlash === false || (cfg.actionFlash == null && cfg.clickFlash === false))
       return (this.lastFlash = { via: "off", ok: false, reason: "actionFlash/clickFlash=false" });
@@ -211,6 +218,22 @@ export class WindowsDriver {
   /** 公开落点发光（物理坐标直闪）：focus 等系统级操作成功后由 main.mjs 调用。 */
   async flashAt(x, y, kind = "focus", radius = 13) {
     return await this.#flash({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }, kind, radius);
+  }
+
+  /** 0.8.1：touch 宿主「正在操作电脑」徽标（active=true 续期；active=false 隐藏）。
+   * mouse/key 动作经 #flash 自动 touch；launch/focus 等非 driver 动作由 main.mjs 手动调用。 */
+  touchActivity(active = true) {
+    if (typeof this.hostActivity !== "function") {
+      this.lastActivity = { via: "none", ok: false, reason: "宿主无 api.agentActivity（版本过旧）" };
+      return this.lastActivity;
+    }
+    try {
+      this.hostActivity({ active: active === true });
+      this.lastActivity = { via: "host", ok: true, active: active === true };
+    } catch (error) {
+      this.lastActivity = { via: "host", ok: false, error: String(error?.message ?? error) };
+    }
+    return this.lastActivity;
   }
 
   // 线程级 DPI 上下文（PER_MONITOR_AWARE_V2），截图与动作同一上下文、坐标自洽。
