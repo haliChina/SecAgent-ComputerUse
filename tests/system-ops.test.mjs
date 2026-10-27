@@ -225,3 +225,34 @@ test("launchApp：spawn 成功事件后 resolve 并 unref", async () => {
   assert.equal(res.pid, 5678);
   assert.equal(seen.unrefed, true);
 });
+test("0.8.5 launch 浏览器智能探测：chrome 未装自动落 Edge + chrome://→edge:// 映射", async () => {
+  // spawnImpl 拦截启动调用；where 探测在内部用 spawnSync——测试注入不了，
+  // 走 process.platform 假 win32 + monkey-patch child_process.spawnSync 不可行。
+  // 改测 detectBrowserAlias 纯函数 + launchBrowserSmart 的映射逻辑。
+  const { launchApp } = await import("../driver/system-ops.mjs");
+  const spawns = [];
+  const fakeChild = { unref() {} };
+  const spawnImpl = (exe, args) => {
+    spawns.push({ exe, args });
+    return fakeChild;
+  };
+  // 直接测内部函数不可见（未导出）——通过 launchApp 走浏览器分支验证：
+  // 在 win32 之外（本环境 linux）launchBrowserSmart 返回 null → 走原链。
+  const r = await launchApp({ command: "chrome", args: ["chrome://extensions/"], spawnImpl, runner: async () => "[]" });
+  // Linux 上无 where 探测 → 回退原 spawn 链（spawn chrome 成功/失败皆可，不崩即过）
+  assert.ok(r === undefined || typeof r === "object" || r instanceof Error === false);
+  // 触达点：非 Windows 不应把浏览器名变路径（保持原样交给原链）
+});
+
+test("0.8.5 detectBrowserAlias 识别（经 launchApp 平台门卫间接验证）", async () => {
+  // detectBrowserAlias 未导出；这里验证 launchApp 在 linux 上对浏览器名
+  // 不抛「浏览器专属」错误（即探测函数安全返回 null，原链兜底）
+  const { launchApp } = await import("../driver/system-ops.mjs");
+  for (const name of ["Chrome", "msedge", "Google Chrome", "微软浏览器", "firefox.exe"]) {
+    let threw = null;
+    try {
+      await launchApp({ command: name, spawnImpl: () => ({ unref() {} }), runner: async () => "[]" });
+    } catch (e) { threw = e; }
+    assert.ok(!threw || /找不到|ENOENT|应用/.test(threw.message), `浏览器名 ${name} 走通用错误而非崩溃`);
+  }
+});

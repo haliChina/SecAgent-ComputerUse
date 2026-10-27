@@ -183,6 +183,58 @@ Write-Output (ConvertTo-Json ([ordered]@{ ok = $true; length = ${String(text ?? 
  *          runner?:Function, timeoutMs?:number}} opts
  * @returns {Promise<{launched:string, args?:string[], pid?:number|null, via?:"spawn"|"shortcut"}>}
  */
+/** 0.8.5：浏览器名识别（chrome/edge/firefox 常见写法→规范名；null=非浏览器）。 */
+function detectBrowserAlias(name) {
+  const n = String(name ?? "").toLowerCase().replace(/\.exe$/i, "").replace(/[\s_-]/g, "");
+  if (n === "chrome" || n === "googlechrome" || n === "google浏览器" || n === "谷歌浏览器") return "chrome";
+  if (n === "edge" || n === "msedge" || n === "microsoftedge" || n === "微软浏览器") return "msedge";
+  if (n === "firefox" || n === "mozillafirefox" || n === "火狐浏览器") return "firefox";
+  return null;
+}
+
+/**
+ * 0.8.5：浏览器智能启动。探测链：想要的那款 → Edge（Windows 必装兜底）→ Firefox。
+ * URL 参数做协议映射（chrome:// ↔ edge://；edge/edge:// 前缀同理）。
+ * 全部探测不到返回 null（调用方走快捷方式兜底链）。
+ */
+async function launchBrowserSmart({ want, args, spawnFn }) {
+  const { spawnSync: sync } = await import("node:child_process");
+  const order = [want, ...(want !== "msedge" ? ["msedge"] : []), ...(want !== "firefox" ? ["firefox"] : [])];
+  let exe = null;
+  let picked = null;
+  for (const name of order) {
+    try {
+      const r = sync("where", [name], { windowsHide: true, timeout: 4000 });
+      if (r?.status === 0) {
+        const first = String(r.stdout || "").trim().split(/\r?\n/)[0];
+        if (first) { exe = first; picked = name; break; }
+      }
+    } catch { /* 继续 */ }
+  }
+  if (!exe) return null;
+  const mapped = (args ?? []).map((a) => {
+    let u = String(a);
+    if (picked === "msedge" && u.startsWith("chrome://")) u = "edge://" + u.slice("chrome://".length);
+    if (picked === "chrome" && u.startsWith("edge://")) u = "chrome://" + u.slice("edge://".length);
+    return u;
+  });
+  try {
+    const child = spawnFn(exe, mapped, { detached: true, stdio: "ignore" });
+    child?.unref?.();
+  } catch { return null; }
+  const note =
+    picked === want
+      ? undefined
+      : `未检测到 ${want === "chrome" ? "Chrome" : want === "firefox" ? "Firefox" : want}，已用 ${picked === "msedge" ? "Microsoft Edge" : picked} 打开${mapped.some((u) => /^edge:|^chrome:/.test(u)) ? "（内部协议链接已同步转换）" : ""}。`;
+  return {
+    launched: picked,
+    args: mapped,
+    pid: null,
+    via: "spawn",
+    ...(note ? { note } : {})
+  };
+}
+
 export async function launchApp({ command, args = [], spawnImpl, runner, timeoutMs = 15000 } = {}) {
   const target = String(command ?? "").trim();
   if (!target) throw new Error("launch 需要 command（可执行文件名或应用名，如 notepad、腾讯视频）");
@@ -190,6 +242,16 @@ export async function launchApp({ command, args = [], spawnImpl, runner, timeout
   // “const spawn = spawnImpl ?? spawn” 在生产路径（不注入 spawnImpl）必抛
   // “Cannot access 'spawn' before initialization”（注入 fake 的测试因 ?? 短路而全绿）。
   const spawnFn = spawnImpl ?? defaultSpawn;
+
+  // 0.8.5：浏览器名智能归一——用户/agent 说 chrome 但机器只有 Edge 时
+  // 自动落 Edge 并明说；chrome:// 链接换 edge://。防「选择打开方式的软件」弹窗
+  // （chrome:// 是 Chromium 内核私有协议，非 Chromium 默认浏览器不认）。
+  const browserAlias = detectBrowserAlias(target);
+  if (browserAlias) {
+    const r = await launchBrowserSmart({ want: browserAlias, args, spawnFn });
+    // 两个浏览器都探测不到（极少数精简系统）→ 走原有 spawn/快捷方式链兜底
+    if (r) return r;
+  }
 
   const trySpawn = () =>
     new Promise((resolve, reject) => {

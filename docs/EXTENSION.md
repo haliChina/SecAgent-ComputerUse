@@ -56,3 +56,34 @@ element-map 编号地图 → click(elementId) 照常点击
 ## 从源码构建（可选）
 
 `extension/` 是免构建的纯静态 MV3 项目（无第三方依赖、无打包步骤），直接加载即可。改完 `collector.js` / `background.js` 后在 `chrome://extensions` 点扩展卡片上的刷新按钮。
+
+
+## 常见问题：浏览器弹「请关闭开发者模式扩展」警告
+
+Edge/Chrome 对「加载已解压的扩展程序」装的扩展，每隔一两天会弹一次
+「请关闭开发者模式扩展」的警告。这是浏览器内置策略，唯一根治法是写入
+浏览器策略 `ExtensionDeveloperModeWarning=0`（HKCU 用户级即可，无需管理员）。
+
+**最简单**：设置控制台（`settings` 工具）→「扩展配对」卡片 →
+点「关闭 Edge 警告弹窗」（或 Chrome 版）按钮，一键写入。
+
+**手动执行**（cmd）：
+
+```bat
+:: Edge
+reg add "HKCU\Software\Policies\Microsoft\Edge" /v ExtensionDeveloperModeWarning /t REG_DWORD /d 0 /f
+:: Chrome
+reg add "HKCU\Software\Policies\Google\Chrome" /v ExtensionDeveloperModeWarning /t REG_DWORD /d 0 /f
+```
+
+写入后重启浏览器生效。
+
+## 常见问题：点「打开扩展管理页」弹「选择打开方式的软件」
+
+chrome:// 是 Chromium 内核私有协议。若系统默认浏览器不是 Chrome/Edge
+（如 Firefox），把 chrome:// 链接交给默认浏览器就会弹「选择打开方式的软件」
+选择框。0.8.5 起「打开扩展管理页」会**显式探测本机 Chrome/Edge 并用其打开**
+（Chrome 优先、Edge 兜底），不再经过系统默认浏览器。
+
+`launch` 工具同样智能：说 chrome 但机器没装 Chrome 时自动换 Edge 打开，
+chrome:// 链接自动转换为 edge:// 等价协议，并在返回里说明。

@@ -265,17 +265,20 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
 
     var guide = el('div', 'svc-msg');
     guide.style.cssText = 'white-space:pre-line';
-    guide.textContent = '安装（只需三步）：\n1. 点下方「打开扩展管理页」，开启右上角「开发者模式」；\n2. 「加载已解压的扩展程序」，选插件目录下的 extension 文件夹；\n3. 装好后这里会出现「待允许」提示，点「允许」即完成。\n\n扩展装好后无需任何输入：自动发现、自动连接。手动配对码仅高级场景使用（见 docs/EXTENSION.md）。';
+    guide.textContent = '安装（只需三步）：\n1. 点下方「打开扩展管理页」，开启右上角「开发者模式」；\n2. 点「打开扩展文件夹」会弹出资源管理器——回到浏览器点「加载已解压的扩展程序」，选中弹出的这个文件夹；\n3. 装好后这里会出现「待允许」提示，点「允许」即完成。\n\nEdge 用户：装完扩展后 Edge 会隔一两天弹「请关闭开发者模式扩展」的警告——点下方「关闭 Edge 警告弹窗」按钮一次性根治（写入浏览器策略，无需管理员）。Chrome 同理（选 Chrome 版按钮）。\n\n扩展装好后无需任何输入：自动发现、自动连接。手动配对码仅高级场景使用（见 docs/EXTENSION.md）。';
     box.appendChild(guide);
 
     var kv = el('div');
     kv.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:6px 0';
     var bOpen = el('button', null, '打开扩展管理页');
+    var bDir = el('button', null, '打开扩展文件夹');
+    var bSilenceEdge = el('button', 'secondary', '关闭 Edge 警告弹窗');
+    var bSilenceChrome = el('button', 'secondary', '关闭 Chrome 警告弹窗');
     var bUntrust = el('button', 'secondary', '清除已信任列表');
     var bPort = el('button', 'secondary', '复制端口（手动）');
     var bToken = el('button', 'secondary', '复制配对码（手动）');
     var bReset = el('button', 'danger', '重置配对码');
-    kv.appendChild(bOpen); kv.appendChild(bUntrust); kv.appendChild(bPort); kv.appendChild(bToken); kv.appendChild(bReset);
+    kv.appendChild(bOpen); kv.appendChild(bDir); kv.appendChild(bSilenceEdge); kv.appendChild(bSilenceChrome); kv.appendChild(bUntrust); kv.appendChild(bPort); kv.appendChild(bToken); kv.appendChild(bReset);
     box.appendChild(kv);
     section.appendChild(box);
 
@@ -314,6 +317,21 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
     }
     bOpen.addEventListener('click', function () {
       post('/api/ext/open-browser').catch(function (e) { msg.textContent = '打开失败，请手动访问 chrome://extensions/（' + (e.message || e) + '）'; });
+    });
+    bDir.addEventListener('click', function () {
+      post('/api/ext/open-dir').then(function (r) {
+        msg.textContent = '已在资源管理器打开扩展文件夹——回到浏览器点「加载已解压的扩展程序」选中它即可。';
+      }).catch(function (e) { msg.textContent = '打开失败：' + (e.message || e); });
+    });
+    bSilenceEdge.addEventListener('click', function () {
+      post('/api/ext/silence-warning', { browser: 'edge' }).then(function (r) {
+        msg.textContent = '已写入 Edge 策略（ExtensionDeveloperModeWarning=0），重启 Edge 后生效，之后不再弹开发者模式警告。';
+      }).catch(function (e) { msg.textContent = '写入失败（' + (e.message || e) + '）——可手动执行：reg add "HKCU\\Software\\Policies\\Microsoft\\Edge" /v ExtensionDeveloperModeWarning /t REG_DWORD /d 0 /f'; });
+    });
+    bSilenceChrome.addEventListener('click', function () {
+      post('/api/ext/silence-warning', { browser: 'chrome' }).then(function (r) {
+        msg.textContent = '已写入 Chrome 策略，重启 Chrome 后生效。';
+      }).catch(function (e) { msg.textContent = '写入失败（' + (e.message || e) + '）——可手动执行：reg add "HKCU\\Software\\Policies\\Google\\Chrome" /v ExtensionDeveloperModeWarning /t REG_DWORD /d 0 /f'; });
     });
     bUntrust.addEventListener('click', function () {
       if (!window.confirm('清除所有已信任扩展？清除后扩展需重新点「允许」。')) return;
