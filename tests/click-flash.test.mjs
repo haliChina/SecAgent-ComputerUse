@@ -126,7 +126,7 @@ test("move：移动落点小环（用户要求移动同发光）", async () => {
   await drain();
   const flash = hostCalls.find((c) => c[2].kind === "click");
   assert.ok(flash, "move 应触发小环");
-  assert.equal(flash[2].ms, 320, "移动小环更短促");
+  assert.equal(flash[2].ms, 700, "移动小环更短促（0.8.3：320→700，用户反馈太短）");
   assert.ok(flash[2].radius <= 9, "移动小环半径更小");
 });
 

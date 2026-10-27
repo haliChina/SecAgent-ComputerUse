@@ -146,6 +146,7 @@ test("0.8.2 flashAt 透传 extra（chord label / scroll direction）", async () 
   });
   await driver.flashAt(10, 10, "chord", 12, { label: "Ctrl+S" });
   await driver.flashAt(10, 10, "scroll", 10, { direction: -1 });
-  assert.deepEqual(seen[0].opts, { kind: "chord", radius: 12, label: "Ctrl+S" });
-  assert.deepEqual(seen[1].opts, { kind: "scroll", radius: 10, direction: -1 });
+  // 0.8.3：#flash 统一解析 ms（extra>每类默认>设置项）并显式下发宿主
+  assert.deepEqual(seen[0].opts, { kind: "chord", radius: 12, label: "Ctrl+S", ms: 1500 });
+  assert.deepEqual(seen[1].opts, { kind: "scroll", radius: 10, direction: -1, ms: 900 });
 });

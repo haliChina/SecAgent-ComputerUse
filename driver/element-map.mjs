@@ -15,7 +15,7 @@ const intv = (v) => Number(v) | 0;
 export function normalizeUia(raw, index) {
   const b = raw.bbox ?? {};
   const x = intv(b.x), y = intv(b.y), w = intv(b.w), h = intv(b.h);
-  return {
+  const rec = {
     id: index,
     name: typeof raw.name === "string" ? raw.name : "",
     role: raw.role ?? "Unknown",
@@ -27,6 +27,13 @@ export function normalizeUia(raw, index) {
     clickable: true,
     source: "uia"
   };
+  // 0.8.4：语义状态透传（inspect 采集；缺失时无该键 = 未知，不臆造）。
+  if (Array.isArray(raw.runtimeId) && raw.runtimeId.length) rec.runtimeId = raw.runtimeId.map((n) => intv(n));
+  if (typeof raw.value === "string" && raw.value !== "") rec.value = raw.value;
+  if (raw.toggleState != null) rec.toggleState = String(raw.toggleState);
+  if (raw.expandState != null) rec.expandState = String(raw.expandState);
+  if (raw.selected != null) rec.selected = raw.selected === true || raw.selected === "true";
+  return rec;
 }
 
 /** 归一化一条 OmniParser 检测（官方 bbox 为 [x1,y1,x2,y2]，也兼容 xywh / 对象）。 */
@@ -135,7 +142,16 @@ export function describeElements(map, geometry = {}) {
   const lines = elements.map((e) => {
     const nm = e.name ? e.name.replace(/\s+/g, " ").trim() : "(无名称)";
     const state = e.enabled ? "" : " (禁用)";
-    return `#${e.id} [${e.role}] "${nm}" bbox=(${e.bbox.x},${e.bbox.y},${e.bbox.w},${e.bbox.h})${state}`;
+    // 0.8.4：语义状态标注——勾选/展开/选中态与输入框现值（UIA 才有）。
+    let sem = "";
+    if (e.toggleState) sem += e.toggleState === "On" ? " ☑" : e.toggleState === "Off" ? " ☐" : ` (${e.toggleState})`;
+    if (e.expandState) sem += e.expandState === "Expanded" ? " ▾已展开" : e.expandState === "Collapsed" ? " ▸未展开" : ` (${e.expandState})`;
+    if (e.selected === true) sem += " ★已选中";
+    if (typeof e.value === "string") {
+      const v = e.value.length > 60 ? e.value.slice(0, 60) + "…" : e.value;
+      sem += ` 值="${v.replace(/\s+/g, " ")}"`;
+    }
+    return `#${e.id} [${e.role}] "${nm}"${sem} bbox=(${e.bbox.x},${e.bbox.y},${e.bbox.w},${e.bbox.h})${state}`;
   });
   const SOURCE_LABELS = {
     uia: "Windows UI Automation",
