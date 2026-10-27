@@ -209,8 +209,9 @@ export async function activate(api) {
         probeCuda: async () => await manager.probeCuda(),
         // 发光标记自检：屏幕中心真实闪一次，报告走哪条通道（host/native/off）
         flashProbe: async () => await driver.flashAt(960, 540, "focus", 18),
-        // 0.8.2 五形态实测：依次真实闪五种光效（间隔约 1 秒），肉眼对照——
+        // 0.8.2 五形态实测：依次真实闪五种光效，肉眼对照——
         // 旋转红环=click、蓝胶囊=type、键帽=chord、紫箭头=scroll、琥珀环=focus。
+        // 0.8.3：光效时长放长（focus 1200ms），间隔同步放宽防形态重叠。
         flashShapes: async () => {
           const seq = [
             { kind: "click", label: null },
@@ -226,7 +227,7 @@ export async function activate(api) {
             if (it.direction != null) extra.direction = it.direction;
             const r = await driver.flashAt(960, 540, it.kind, it.kind === "focus" ? 18 : 13, extra);
             out.push({ kind: it.kind, via: r?.via, ok: r?.ok });
-            await new Promise((resolve) => setTimeout(resolve, 1050));
+            await new Promise((resolve) => setTimeout(resolve, 1600));
           }
           return out;
         },
@@ -604,6 +605,33 @@ export async function activate(api) {
         return await driver.scroll(asInt(a.x, "x"), asInt(a.y, "y"), amount);
       }
     )
+  );
+
+  // 8) 输入文本
+  api.registerTool(
+    {
+      name: "act",
+      description:
+        "语义动作（0.8.4，对齐 ZCode act）：按 elementId 直接操作 UIA 元素——invoke=点按（按钮/菜单项/超链接）、toggle=勾选/取消勾选、expand=展开或折叠（组合框/树节点）、select=选中选项、setValue=输入框直设文本（不经剪贴板、后台窗口也有效、无焦点抖动）。元素失效返回 found:false（STALE_STATE），重新 inspect 拿新编号再试。能 act 就别坐标点击（语义动作比鼠标点更稳）。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["elementId", "action"],
+        properties: {
+          elementId: { type: "number", description: "最近一次 inspect 返回的元素编号" },
+          action: { type: "string", enum: ["invoke", "toggle", "expand", "select", "setValue"], description: "语义动作类型" },
+          value: { type: "string", description: "setValue 时要设置的文本" }
+        }
+      },
+      hidden: false
+    },
+    guarded("act", async (a) => {
+      if (a.elementId == null || typeof a.action !== "string")
+        throw new Error("act 需要 elementId 与 action（invoke/toggle/expand/select/setValue）");
+      if (a.action === "setValue" && typeof a.value !== "string")
+        throw new Error("act setValue 需要 value 字符串");
+      return await driver.act({ elementId: a.elementId, action: a.action, value: a.value });
+    })
   );
 
   // 8) 输入文本

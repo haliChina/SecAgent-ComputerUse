@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { encodePNG } from "./png.mjs";
 import { computeScale, scaleImage } from "./scale.mjs";
 import { parseChord, isModifier } from "./keycodes.mjs";
+import { actViaUia } from "./uia-inspect.mjs";
 import { inspectViaUia } from "./uia-inspect.mjs";
 import { elementToPhysical, withinVirtualScreen } from "./ext-coords.mjs";
 import { buildElementMap, describeElements, findElement, toDisplayMap, DEFAULT_CAP } from "./element-map.mjs";
@@ -60,6 +61,20 @@ function toImageContent(pngBuffer, name, width, height) {
     name, width, height
   };
 }
+
+/**
+ * 各类发光标记的默认时长（毫秒）。宿主通道经 opts.ms 下发、koffi 兜底通道
+ * 直接用该值销毁窗口；调用方 extra.ms 优先，设置项 flashDurationMs（>0）次之。
+ * 0.8.3：整体放长约一倍——旧默认肉眼来不及循迹（用户反馈「太短」）。
+ */
+export const FLASH_MS = {
+  click: 1000,  // 点击/拖拽终点（红环）
+  type: 1100,   // 输入胶囊（蓝）
+  focus: 1200,  // 聚焦窗口中心（琥珀环）
+  scroll: 900,  // 滚动方向箭头（紫）
+  chord: 1500,  // 组合键键帽（含文本，需留阅读时间）
+  move: 700     // 移动路径小环（高频动作，最轻量）
+};
 
 export class WindowsDriver {
   /**
@@ -186,7 +201,7 @@ export class WindowsDriver {
    * @param {{x:number,y:number}} abs 物理绝对坐标
    * @param {"click"|"type"|"focus"|"scroll"|"chord"} kind
    * @param {number} [radius]
-   * @param {{label?:string,direction?:number}} [extra] chord 键文本 / 滚动方向
+   * @param {{label?:string,direction?:number,ms?:number}} [extra] chord 键文本 / 滚动方向 / 时长覆盖
    * @returns {Promise<{via:string,ok:boolean,stage?:string,error?:string}>}
    */
   async #flash(abs, kind = "click", radius = 13, extra = null) {
@@ -194,9 +209,12 @@ export class WindowsDriver {
     const cfg = this.#cfg();
     if (cfg.actionFlash === false || (cfg.actionFlash == null && cfg.clickFlash === false))
       return (this.lastFlash = { via: "off", ok: false, reason: "actionFlash/clickFlash=false" });
+    // 时长优先级：设置项 flashDurationMs（>0 统一覆盖所有光效）> 调用方 extra.ms > 每类内置默认
+    const userMs = Number(cfg.flashDurationMs) || 0;
+    const ms = Math.max(150, Math.round(userMs || extra?.ms || FLASH_MS[kind] || 900));
     if (typeof this.hostFlash === "function") {
       try {
-        this.hostFlash(Math.round(abs.x), Math.round(abs.y), { kind, radius, ...(extra || {}) });
+        this.hostFlash(Math.round(abs.x), Math.round(abs.y), { kind, radius, ...(extra || {}), ms });
         return (this.lastFlash = { via: "host", ok: true });
       } catch (error) {
         this.lastFlash = { via: "host", ok: false, error: String(error?.message ?? error) };
@@ -206,7 +224,7 @@ export class WindowsDriver {
       const n = await this.#ensureNative();
       if (typeof n.flashMarker === "function") {
         const r = await this.#withThreadDpi(() =>
-          n.flashMarker(Math.round(abs.x), Math.round(abs.y), radius, kind));
+          n.flashMarker(Math.round(abs.x), Math.round(abs.y), radius, kind, ms));
         return (this.lastFlash = r ?? { via: "native", ok: false, stage: "no-return" });
       }
     } catch (error) {
@@ -219,6 +237,45 @@ export class WindowsDriver {
    * extra：chord 的 label / scroll 的 direction 等（透传宿主）。 */
   async flashAt(x, y, kind = "focus", radius = 13, extra = null) {
     return await this.#flash({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }, kind, radius, extra);
+  }
+
+  /**
+   * 0.8.4：按 elementId 执行语义动作（对齐 ZCode act）：invoke（点按）/toggle
+   * （勾选）/expand（展开折叠）/select（选项选择）/setValue（输入框直设值）。
+   * 直接操作 UIA 元素（不经鼠标/键盘）——后台窗口也有效、无焦点抖动；
+   * 元素失效由 PS 侧 RuntimeId 逐元素比对发现（found:false=STALE_STATE），
+   * fail-closed 绝不盲操作。
+   * @param {object} t
+   * @param {number} t.elementId 最近一次 inspect 的编号
+   * @param {"invoke"|"toggle"|"expand"|"select"|"setValue"} t.action
+   * @param {string} [t.value] setValue 的文本
+   */
+  async act({ elementId, action, value } = {}) {
+    if (elementId == null || typeof action !== "string")
+      throw new Error("act 需要 elementId 与 action（invoke/toggle/expand/select/setValue）");
+    const el = findElement(this.#lastMap.elements, elementId);
+    if (!el)
+      throw structuredError("STALE_STATE", `元素 #${elementId} 不在当前地图。请重新 inspect 后再 act。`);
+    if (!el.runtimeId)
+      throw structuredError(
+        "ELEMENT_NO_RUNTIME_ID",
+        `元素 #${elementId} 无 runtimeId（非 UIA 后端或旧地图）。请重新 inspect（UIA/扩展后端）后再 act。`
+      );
+    if (action === "setValue" && typeof value !== "string")
+      throw new Error("act setValue 需要 value 字符串");
+    this.touchActivity(); // 语义操作也是「正在操作电脑」
+    const res = await actViaUia({
+      runner: this.uiaRunner,
+      runtimeId: el.runtimeId,
+      action,
+      value,
+      timeout: this.#cfg().uiaTimeoutMs
+    });
+    // 落点发光：元素中心闪对应色（成功才闪；失败别闪误导）
+    if (res?.ok === true) {
+      this.#flash({ x: el.cx, y: el.cy }, action === "setValue" ? "type" : "click", 12).catch(() => { /* 无碍 */ });
+    }
+    return res;
   }
 
   /** 0.8.1：touch 宿主「正在操作电脑」徽标（active=true 续期；active=false 隐藏）。
@@ -509,8 +566,8 @@ export class WindowsDriver {
       const p = this.#toAbsolute(x, y);
       this.native.setCursorPos(p.x, p.y);
       // 移动落点小环（0.7.3，用户要求「移动同鼠标发光」）：轻量小环，
-      // 与点击同款跑马灯但半径更小、时长更短
-      this.#flash(p, "click", 9, { ms: 320 }).catch(() => { /* 无碍 */ });
+      // 与点击同款跑马灯但半径更小、时长略短（0.8.3：320ms → 700ms）
+      this.#flash(p, "click", 9, { ms: FLASH_MS.move }).catch(() => { /* 无碍 */ });
       return { moved: { x, y } };
     });
   }
@@ -530,9 +587,16 @@ export class WindowsDriver {
 
     let abs, label;
     if (elementId != null) {
-      const el = findElement(this.#lastMap.elements, elementId);
+      let el = findElement(this.#lastMap.elements, elementId);
+      // 0.8.4 失效重查 fail-closed（对齐 ZCode STALE_STATE）：id 不在当前地图时
+      // 不直接报错——自动重 inspect 一次（UIA 遍历顺序稳定，同 id 大概率仍是
+      // 同一元素），仍找不到才结构化报错。绝不盲点来历不明的旧编号。
+      if (!el) {
+        await this.inspect();
+        el = findElement(this.#lastMap.elements, elementId);
+      }
       if (!el)
-        throw new Error(`元素 #${elementId} 不存在或地图已过期，请先调用 inspect。`);
+        throw structuredError("STALE_STATE", `元素 #${elementId} 已失效（重查后仍不存在）。请重新 inspect 后用新编号。`);
       abs = { x: el.cx, y: el.cy };
       label = { elementId, name: el.name };
     } else {
@@ -678,6 +742,13 @@ export class WindowsDriver {
       return { pressed: text };
     });
   }
+}
+
+/** 0.8.4：结构化错误（对齐 ZCode 错误码风格）——message 前缀=码，agent 可按码分支。 */
+function structuredError(code, message) {
+  const err = new Error(`${code}: ${message}`);
+  err.code = code;
+  return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -946,9 +1017,10 @@ export function createKoffiNative(koffiImpl) {
      * @param {number} y
      * @param {number} [radius=13] 环半径（物理像素）
      * @param {"click"|"type"|"focus"|"scroll"} [kind="click"] 颜色语义
+     * @param {number} [ms=300] 屏显时长（毫秒）
      * @returns {{via:"native",ok:boolean,stage?:string,error?:string}} 诊断
      */
-    flashMarker: (x, y, radius = 13, kind = "click") => {
+    flashMarker: (x, y, radius = 13, kind = "click", ms = 300) => {
       const fail = (stage, error) => ({ via: "native", ok: false, stage, error: error ? String(error) : undefined });
       // 0.7.4 懒防御：声明阶段失败（如导出缺失）→ 直接报告，不影响动作
       if (!flashApi) return fail("unavailable", flashApiError);
@@ -1028,7 +1100,7 @@ export function createKoffiNative(koffiImpl) {
             try { if (bmp) DeleteObject(bmp); } catch { /* ignore */ }
             try { if (memDC) DeleteDC(memDC); } catch { /* ignore */ }
             try { if (dc) ReleaseDC(null, dc); } catch { /* ignore */ }
-          }, 300);
+          }, Math.max(100, Number(ms) || 300));
           if (t.unref) t.unref();
         };
         try {

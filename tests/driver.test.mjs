@@ -536,3 +536,87 @@ test("0.8.1 doctor：activity-badge 检查项（有通道报正常/无通道报�
   assert.equal(item2.ok, false);
   assert.match(item2.fix, /升级/);
 });
+
+test("0.8.4 act：语义动作走 actViaUia（touch 徽标+成功落点光），缺参结构化报错", async () => {
+  const activityCalls = [];
+  const els = [
+    { role: "Button", name: "确定", bbox: { x: 40, y: 40, w: 20, h: 20 }, runtimeId: [1, 2, 3] },
+    { role: "Edit", name: "搜索", bbox: { x: 90, y: 90, w: 20, h: 20 }, runtimeId: [4, 5, 6], value: "旧词" }
+  ];
+  let actCalls = [];
+  const decode = (enc) => Buffer.from(enc, "base64").toString("utf16le");
+  const runner = async (encoded) => {
+    // inspect 与 act 共用 runner：$act 是 act 脚本独有变量（inspect 用 $role 遍历）
+    if (decode(encoded).includes("$act")) {
+      actCalls.push(encoded);
+      return { stdout: JSON.stringify({ ok: true, found: true, action: "setValue", newState: "hello" }) };
+    }
+    return { stdout: JSON.stringify({ fgPid: 123, elements: els }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" }),
+    hostActivity: (input) => activityCalls.push({ ...input })
+  });
+  await driver.inspect(); // 建地图（mock UIA 输出）
+  // 无参
+  await assert.rejects(() => driver.act(), /act 需要 elementId/);
+  // 元素不在地图 → STALE_STATE（结构化 code+message 前缀）
+  await assert.rejects(
+    () => driver.act({ elementId: 9, action: "invoke" }),
+    (e) => e.code === "STALE_STATE" && /^STALE_STATE: /.test(e.message)
+  );
+  // setValue 缺 value
+  await assert.rejects(() => driver.act({ elementId: 1, action: "setValue" }), /setValue 需要 value/);
+  // 成功路径：actViaUia 收到调用，徽标 touch，返回解析结果
+  const r = await driver.act({ elementId: 1, action: "setValue", value: "hello" });
+  assert.equal(r.ok, true);
+  assert.equal(r.newState, "hello");
+  assert.equal(actCalls.length, 1, `act 调用数：${actCalls.length}，脚本摘要：${actCalls.map((c) => decode(c).slice(0, 40)).join(" || ")}`);
+  // 徽标 touch 两次：act 入口 1 次 + 成功落点光 #flash 开头 1 次（by design）
+  assert.equal(activityCalls.length, 2);
+});
+
+test("0.8.4 click 失效重查 fail-closed：id 不在地图自动重 inspect，仍无则 STALE_STATE", async () => {
+  let inspectCount = 0;
+  const runner = async () => {
+    inspectCount += 1;
+    return { stdout: JSON.stringify({ fgPid: 1, elements: [
+      { role: "Button", name: "打开", bbox: { x: 10, y: 10, w: 20, h: 20 }, runtimeId: [7, 8] }
+    ] }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" })
+  });
+  // 地图为空 → click(0) 触发自动重查（inspect）→ 新地图有 #0 → 点击成功
+  const r = await driver.clickTarget({ elementId: 0 });
+  assert.ok(r);
+  assert.ok(inspectCount >= 1, "失效触发了自动重 inspect");
+  // 重查后仍没有的 id → STALE_STATE 结构化错误
+  await assert.rejects(
+    () => driver.clickTarget({ elementId: 77 }),
+    (e) => e.code === "STALE_STATE" && /^STALE_STATE: /.test(e.message)
+  );
+});
+
+test("0.8.4 element-map 语义状态：☑/▾/★/值 标注与 runtimeId 透传", async () => {
+  const { describeElements, buildElementMap } = await import("../driver/element-map.mjs");
+  const raw = [
+    { role: "CheckBox", name: "自动更新", bbox: { x: 0, y: 0, w: 10, h: 10 }, toggleState: "On", enabled: true },
+    { role: "ComboBox", name: "模式", bbox: { x: 0, y: 20, w: 10, h: 10 }, expandState: "Collapsed", runtimeId: [3, 1], enabled: true },
+    { role: "ListItem", name: "条目 A", bbox: { x: 0, y: 40, w: 10, h: 10 }, selected: true, enabled: true },
+    { role: "Edit", name: "搜索", bbox: { x: 0, y: 60, w: 10, h: 10 }, value: "x".repeat(80), enabled: true }
+  ];
+  const map = buildElementMap(raw, "uia", {});
+  assert.ok(map.elements[1].runtimeId?.length === 2, "runtimeId 透传");
+  const text = describeElements(map, {});
+  assert.match(text, /#0/, "编号分配");
+  assert.match(text, /☑/, "勾选态");
+  assert.match(text, /▸未展开/, "折叠态");
+  assert.match(text, /★已选中/, "选中态");
+  assert.match(text, /值="/, "现值标注");
+  assert.match(text, /…/, "超长截断");
+});
