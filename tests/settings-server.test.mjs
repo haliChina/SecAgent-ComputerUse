@@ -157,3 +157,88 @@ test("未知 API 返回 404", async () => {
     await server.stop();
   }
 });
+
+test("0.8.5 /api/ext/open-dir：openDir 注入时返回目录并调用（资源管理器入口）", async () => {
+  const opened = [];
+  const manager = fakeManager();
+  const server = createSettingsServer({
+    getConfig: () => ({}),
+    setConfig: () => {},
+    manager,
+    pageHtml: "<html></html>",
+    openDir: () => { opened.push(1); return "/plugins/computer-use/extension"; }
+  });
+  const { url } = await server.start();
+  const parsed = new URL(url);
+  const token = parsed.searchParams.get("key");
+  try {
+    const res = await fetch(`${parsed.origin}/api/ext/open-dir?key=${token}`, { method: "POST" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.opened, true);
+    assert.match(body.dir, /extension/);
+    assert.equal(opened.length, 1);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("0.8.5 /api/ext/silence-warning：写入浏览器策略（reg add 命令经 runCommand）", async () => {
+  const commands = [];
+  const manager = fakeManager();
+  const server = createSettingsServer({
+    getConfig: () => ({}),
+    setConfig: () => {},
+    manager,
+    pageHtml: "<html></html>",
+    runCommand: (cmd) => { commands.push(cmd); return "OK 操作成功完成。"; }
+  });
+  const { url } = await server.start();
+  const parsed = new URL(url);
+  const token = parsed.searchParams.get("key");
+  const post = (p, b) => fetch(`${parsed.origin}${p}?key=${token}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(b)
+  });
+  try {
+    const res = await post("/api/ext/silence-warning", { browser: "edge" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.match(body.command, /Policies\\Microsoft\\Edge/);
+    assert.match(body.command, /ExtensionDeveloperModeWarning/);
+    const res2 = await post("/api/ext/silence-warning", { browser: "chrome" });
+    assert.match((await res2.json()).command, /Policies\\Google\\Chrome/);
+    // 非法浏览器名拒绝
+    const res3 = await post("/api/ext/silence-warning", { browser: "safari" });
+    assert.equal(res3.status, 400);
+    assert.equal(commands.length, 2);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("0.8.5 /api/ext/open-browser：返回 usedBrowser 字段（Chromium 探测在非 win32 为 null）", async () => {
+  const manager = fakeManager();
+  const server = createSettingsServer({
+    getConfig: () => ({}),
+    setConfig: () => {},
+    manager,
+    pageHtml: "<html></html>"
+  });
+  const { url } = await server.start();
+  const parsed = new URL(url);
+  const token = parsed.searchParams.get("key");
+  try {
+    const res = await fetch(`${parsed.origin}/api/ext/open-browser?key=${token}`, { method: "POST" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.opened, true);
+    // Linux 测试环境无 Chromium 探测：usedBrowser=null，URL 仍返回
+    assert.equal(body.usedBrowser, null);
+    assert.equal(body.url, "chrome://extensions/");
+  } finally {
+    await server.stop();
+  }
+});

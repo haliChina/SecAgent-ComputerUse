@@ -11,6 +11,12 @@ import { createOmniParserManager } from "./omniparser/omniparser-manager.mjs";
 import { SERVER_PY } from "./omniparser/server-template.mjs";
 import { createNudge } from "./reasoning/nudge.mjs";
 import { createExtensionBridge } from "./driver/extension-bridge.mjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+
+// 插件根目录（explorer 打开 extension/ 用）
+const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const pointSchema = (extra = {}) => ({
   type: "object",
@@ -103,7 +109,19 @@ export async function activate(api) {
     },
     manager,
     extBridge,
-    pageHtml: CONSOLE_HTML
+    pageHtml: CONSOLE_HTML,
+    // 0.8.5：资源管理器打开扩展目录（用户不知道插件装在哪）。
+    openDir: () => {
+      const extDir = path.join(pluginRoot, "extension");
+      const child = spawn("explorer", [extDir], { detached: true, stdio: "ignore" });
+      child?.unref?.();
+      return extDir;
+    },
+    // 0.8.5：执行注册表命令（一键关闭 Edge/Chrome 开发者模式警告，HKCU 免管理员）。
+    runCommand: (cmd) => {
+      const r = spawnSync("cmd", ["/c", cmd], { windowsHide: true, timeout: 8000 });
+      return `${r?.status === 0 ? "OK" : "exit " + r?.status} ${String(r?.stdout || "")}`;
+    }
   });
   await settingsServer.start();
   if (initial.extBridgeEnabled !== false) await extBridge.start().catch(() => {});
@@ -427,7 +445,7 @@ export async function activate(api) {
     {
       name: "launch",
       description:
-        "启动应用（detached，不阻塞）。**直接写应用名即可**（如 launch('腾讯视频')、launch('网易云音乐')）：找不到可执行时会自动搜索桌面与开始菜单的快捷方式并启动。应用名从任务栏/开始菜单**逐字复制**（不翻译、不加后缀、不规范化）。也可启动可执行文件/打开网址（launch('msedge', ['https://…'])）。启动后建议 wait 再 screenshot。",
+        "启动应用（detached，不阻塞）。**直接写应用名即可**（如 launch('腾讯视频')、launch('网易云音乐')）：找不到可执行时会自动搜索桌面与开始菜单的快捷方式并启动。应用名从任务栏/开始菜单**逐字复制**（不翻译、不加后缀、不规范化）。也可启动可执行文件/打开网址（launch('msedge', ['https://…'])）。浏览器名（chrome/edge/firefox）智能处理：未安装的那款会自动换已安装的浏览器打开并说明（chrome:// 链接自动换 edge:// 等价协议）。启动后建议 wait 再 screenshot。",
       inputSchema: {
         type: "object",
         additionalProperties: false,
