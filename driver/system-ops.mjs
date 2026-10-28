@@ -198,17 +198,28 @@ function detectBrowserAlias(name) {
  * 全部探测不到返回 null（调用方走快捷方式兜底链）。
  */
 async function launchBrowserSmart({ want, args, spawnFn }) {
-  const { spawnSync: sync } = await import("node:child_process");
+  // 0.8.6：异步探测（spawnSync 会阻塞 Electron 宿主主进程至多 12 秒）
+  const probe = (name) =>
+    new Promise((resolve) => {
+      let child;
+      try {
+        child = spawnFn("where", [name], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      } catch { resolve(null); return; }
+      if (!child || typeof child.once !== "function") { resolve(null); return; } // 测试注入的简化 fake
+      let buf = "";
+      const timer = setTimeout(() => { try { child.kill(); } catch {} resolve(null); }, 4000);
+      child.stdout?.on("data", (c) => { buf += c; });
+      child.once("close", (code) => { clearTimeout(timer); resolve(code === 0 ? buf : null); });
+      child.once("error", () => { clearTimeout(timer); resolve(null); });
+    });
   const order = [want, ...(want !== "msedge" ? ["msedge"] : []), ...(want !== "firefox" ? ["firefox"] : [])];
   let exe = null;
   let picked = null;
   for (const name of order) {
     try {
-      const r = sync("where", [name], { windowsHide: true, timeout: 4000 });
-      if (r?.status === 0) {
-        const first = String(r.stdout || "").trim().split(/\r?\n/)[0];
-        if (first) { exe = first; picked = name; break; }
-      }
+      const r = await probe(name);
+      const first = r ? String(r).trim().split(/\r?\n/)[0] : "";
+      if (first) { exe = first; picked = name; break; }
     } catch { /* 继续 */ }
   }
   if (!exe) return null;

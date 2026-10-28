@@ -242,3 +242,54 @@ test("0.8.5 /api/ext/open-browser：返回 usedBrowser 字段（Chromium 探测�
     await server.stop();
   }
 });
+
+test("0.8.6 端口复用：preferredPort 优先绑定（插件重载后旧控制台页面不死）", async () => {
+  const manager = fakeManager();
+  const server1 = createSettingsServer({
+    getConfig: () => ({}), setConfig: () => {}, manager, pageHtml: "<html></html>",
+    preferredPort: 39790
+  });
+  const r1 = await server1.start();
+  try {
+    assert.equal(r1.port, 39790, "绑定到指定端口");
+    assert.equal(r1.reused, true, "reused 标记");
+  } finally { await server1.stop(); }
+  // 同端口可再次绑定（stop 释放后）
+  const server2 = createSettingsServer({
+    getConfig: () => ({}), setConfig: () => {}, manager, pageHtml: "<html></html>",
+    preferredPort: 39790
+  });
+  const r2 = await server2.start();
+  try {
+    assert.equal(r2.port, 39790);
+  } finally { await server2.stop(); }
+});
+
+test("0.8.6 端口被占时回退随机（不因冲突而启动失败）", async () => {
+  const manager = fakeManager();
+  // 先占住 39791
+  const blocker = createSettingsServer({
+    getConfig: () => ({}), setConfig: () => {}, manager, pageHtml: "<html></html>",
+    preferredPort: 39791
+  });
+  const b = await blocker.start();
+  const server = createSettingsServer({
+    getConfig: () => ({}), setConfig: () => {}, manager, pageHtml: "<html></html>",
+    preferredPort: 39791
+  });
+  try {
+    const r = await server.start();
+    assert.ok(r.port > 0 && r.port !== 39791, `回退到随机端口 ${r.port}`);
+    assert.equal(r.reused, false);
+  } finally {
+    await server.stop();
+    await blocker.stop();
+  }
+});
+
+test("0.8.6 死页横幅：控制台 HTML 含连接断开提示（插件重载换端口后旧页面明确指引）", async () => {
+  const { CONSOLE_HTML } = await import("../settings/console-page.mjs");
+  assert.match(CONSOLE_HTML, /连接已断开/, "横幅文案");
+  assert.match(CONSOLE_HTML, /settings 工具打开新的设置控制台/, "重开指引");
+  assert.match(CONSOLE_HTML, /markDead/, "检测函数");
+});

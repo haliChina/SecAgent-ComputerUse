@@ -3,31 +3,41 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
-import { spawn as defaultSpawn, spawnSync as defaultSpawnSync } from "node:child_process";
+import { spawn as defaultSpawn } from "node:child_process";
 import { mergeConfig, describeSettings, DEFAULT_CONFIG } from "./config-schema.mjs";
 
 const MAX_BODY = 128 * 1024;
 
-/** 0.8.5：找本机 Chromium 系浏览器（Chrome 优先，Edge 兜底——Windows 必装）。
- * chrome:// 这类内部协议只有 Chromium 内核认：交给系统默认浏览器时，
- * 若默认是 Firefox 等就会弹「选择打开方式的软件」——必须显式指定浏览器。 */
-function findChromiumExe() {
+/** 0.8.6：异步探测（where 用 spawnSync 会阻塞 Electron 主进程至多 8 秒——
+ * 宿主是 in-process 插件，同步调用冻结整个应用）。找本机 Chromium 系浏览器
+ * （Chrome 优先，Edge 兜底——Windows 必装）。
+ * chrome:// 内部协议只有 Chromium 内核认：默认浏览器非 Chromium 时会弹
+ * 「选择打开方式的软件」——必须显式指定浏览器。 */
+async function findChromiumExe() {
   if (process.platform !== "win32") return null;
   for (const name of ["chrome", "msedge"]) {
     try {
-      const r = defaultSpawnSync("where", [name], { windowsHide: true, timeout: 4000 });
-      if (r?.status === 0) {
-        const exe = String(r.stdout || "").trim().split(/\r?\n/)[0];
-        if (exe) return { name, exe };
-      }
+      const out = await new Promise((resolve) => {
+        let child;
+        try {
+          child = defaultSpawn("where", [name], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+        } catch { resolve(null); return; }
+        let buf = "";
+        const timer = setTimeout(() => { try { child.kill(); } catch {} resolve(null); }, 4000);
+        child.stdout?.on("data", (c) => { buf += c; });
+        child.once("close", (code) => { clearTimeout(timer); resolve(code === 0 ? buf : null); });
+        child.once("error", () => { clearTimeout(timer); resolve(null); });
+      });
+      const exe = out ? String(out).trim().split(/\r?\n/)[0] : "";
+      if (exe) return { name, exe };
     } catch { /* 继续 */ }
   }
   return null;
 }
 
 /** 0.8.5：用 Chromium 系打开内部协议页；找不到返回 null（调用方回退默认浏览器）。 */
-function openInChromium(url) {
-  const hit = findChromiumExe();
+async function openInChromium(url) {
+  const hit = await findChromiumExe();
   if (!hit) return null;
   try {
     const child = defaultSpawn(hit.exe, [url], { detached: true, stdio: "ignore", windowsHide: true });
@@ -63,6 +73,7 @@ export function createSettingsServer(options = {}) {
   const openBrowser = options.openBrowser || defaultOpenBrowser;
   const openDir = options.openDir || null; // 0.8.5：资源管理器打开扩展目录（main 注入路径）
   const runCommand = options.runCommand || null; // 0.8.5：执行注册表命令（关 Edge 开发者警告）
+  const preferredPort = options.preferredPort ?? 0; // 0.8.6：复用上次端口（重载后旧页面不死）
 
   let token = "";
   let server = null;
@@ -163,7 +174,7 @@ export function createSettingsServer(options = {}) {
     if (path === "/api/ext/open-browser" && method === "POST") {
       let used = null;
       try {
-        used = openInChromium("chrome://extensions/");
+        used = await openInChromium("chrome://extensions/");
       } catch { /* 探测失败回退 */ }
       if (!used) {
         try {
@@ -248,11 +259,25 @@ export function createSettingsServer(options = {}) {
         json(res, 500, { error: error instanceof Error ? error.message : String(error) });
       }
     });
+    // 0.8.6：端口复用——preferredPort（>0）优先（插件重载后旧控制台页面继续可用），
+    // 被占用则回退随机。main 持久化「本次实际端口」，下次启动传入。
+    const want = Math.trunc(Number(preferredPort) || 0);
     return new Promise((resolve) => {
-      server.listen(0, "127.0.0.1", () => {
+      const onBound = () => {
         boundPort = server.address().port;
-        resolve({ port: boundPort, url: consoleUrl() });
-      });
+        resolve({ port: boundPort, url: consoleUrl(), reused: want > 0 && boundPort === want });
+      };
+      const onBusy = () => {
+        server.removeListener("listening", onBound);
+        server.listen(0, "127.0.0.1", onBound);
+      };
+      if (want > 0 && want < 65536) {
+        server.once("error", onBusy);
+        server.once("listening", onBound);
+        server.listen(want, "127.0.0.1");
+      } else {
+        server.listen(0, "127.0.0.1", onBound);
+      }
     });
   }
 

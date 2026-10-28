@@ -95,6 +95,27 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
     if (text !== undefined) n.textContent = text;
     return n;
   }
+  // 0.8.6：死页检测——插件重载后端口随机变，旧页面的请求全部「Failed to fetch」。
+  // 此前轮询失败被静默吞掉（页面看似正常），点按钮才报错——用户实测困惑点。
+  // 现在任何请求失败都在顶部亮红条，明确指引重开控制台。
+  var deadBar = document.createElement('div');
+  deadBar.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#c0392b;color:#fff;padding:10px 16px;font:13px/1.5 system-ui;box-shadow:0 2px 8px rgba(0,0,0,.35)';
+  deadBar.textContent = '⚠ 连接已断开：插件已重载或停止（控制台端口会变化）。本页已失效——请关闭本页，让 Agent 重新调用 settings 工具打开新的设置控制台。';
+  document.body.appendChild(deadBar);
+  var deadShown = false;
+  function markDead() {
+    if (deadShown) return;
+    deadShown = true;
+    deadBar.style.display = 'block';
+  }
+  var rawFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    return rawFetch(input, init).catch(function (e) {
+      markDead();
+      throw e;
+    });
+  };
+
   function api(path, options) {
     return fetch(path + '?key=' + encodeURIComponent(KEY), options).then(function (r) {
       return r.json().then(function (data) {
