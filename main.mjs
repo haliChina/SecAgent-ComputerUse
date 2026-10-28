@@ -121,9 +121,17 @@ export async function activate(api) {
     runCommand: (cmd) => {
       const r = spawnSync("cmd", ["/c", cmd], { windowsHide: true, timeout: 8000 });
       return `${r?.status === 0 ? "OK" : "exit " + r?.status} ${String(r?.stdout || "")}`;
-    }
+    },
+    // 0.8.6：复用上次控制台端口（插件重载后旧页面不死——用户实测「Failed to fetch」根因）。
+    preferredPort: Number(readConfig().lastConsolePort) || 0
   });
-  await settingsServer.start();
+  const started = await settingsServer.start();
+  // 0.8.6：记下本次端口，下次插件重载后优先复用（旧控制台页面继续可用）。
+  if (started?.port) {
+    try {
+      persistConfig({ ...readConfig(), lastConsolePort: started.port });
+    } catch { /* 无碍 */ }
+  }
   if (initial.extBridgeEnabled !== false) await extBridge.start().catch(() => {});
 
   // 原生设置 handler（宿主未来在设置页渲染表单时使用；当前用 HTTP 控制台）。
