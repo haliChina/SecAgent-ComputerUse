@@ -234,7 +234,7 @@ export async function activate(api) {
         // issue #18 问题 3：doctor 报告无 CUDA 机器不建议启用 OmniParser
         probeCuda: async () => await manager.probeCuda(),
         // 发光标记自检：屏幕中心真实闪一次，报告走哪条通道（host/native/off）
-        flashProbe: async () => await driver.flashAt(960, 540, "focus", 18),
+        flashProbe: async () => await driver.flashAt(960, 540, "focus", 26),
         // 0.8.2 五形态实测：依次真实闪五种光效，肉眼对照——
         // 旋转红环=click、蓝胶囊=type、键帽=chord、紫箭头=scroll、琥珀环=focus。
         // 0.8.3：光效时长放长（focus 1200ms），间隔同步放宽防形态重叠。
@@ -251,7 +251,7 @@ export async function activate(api) {
             const extra = {};
             if (it.label) extra.label = it.label;
             if (it.direction != null) extra.direction = it.direction;
-            const r = await driver.flashAt(960, 540, it.kind, it.kind === "focus" ? 18 : 13, extra);
+            const r = await driver.flashAt(960, 540, it.kind, it.kind === "focus" ? 26 : 22, extra);
             out.push({ kind: it.kind, via: r?.via, ok: r?.ok });
             await new Promise((resolve) => setTimeout(resolve, 1600));
           }
@@ -444,7 +444,7 @@ export async function activate(api) {
       // 聚焦落点发光（0.7.3，用户要求）：目标窗口中心闪琥珀色标记——
       // 用户肉眼可循 Agent 的焦点切换轨迹。无碍失败。
       if (res?.focused && res.center)
-        driver.flashAt(res.center.x, res.center.y, "focus", 16).catch(() => {});
+        driver.flashAt(res.center.x, res.center.y, "focus", 24).catch(() => {});
       return res;
     })
   );

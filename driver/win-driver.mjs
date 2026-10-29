@@ -204,7 +204,7 @@ export class WindowsDriver {
    * @param {{label?:string,direction?:number,ms?:number}} [extra] chord 键文本 / 滚动方向 / 时长覆盖
    * @returns {Promise<{via:string,ok:boolean,stage?:string,error?:string}>}
    */
-  async #flash(abs, kind = "click", radius = 13, extra = null) {
+  async #flash(abs, kind = "click", radius = 22, extra = null) {
     this.touchActivity(); // 徽标随动作 touch（独立于发光开关）
     const cfg = this.#cfg();
     if (cfg.actionFlash === false || (cfg.actionFlash == null && cfg.clickFlash === false))
@@ -235,7 +235,7 @@ export class WindowsDriver {
 
   /** 公开落点发光（物理坐标直闪）：focus 等系统级操作成功后由 main.mjs 调用。
    * extra：chord 的 label / scroll 的 direction 等（透传宿主）。 */
-  async flashAt(x, y, kind = "focus", radius = 13, extra = null) {
+  async flashAt(x, y, kind = "focus", radius = 22, extra = null) {
     return await this.#flash({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }, kind, radius, extra);
   }
 
@@ -273,7 +273,7 @@ export class WindowsDriver {
     });
     // 落点发光：元素中心闪对应色（成功才闪；失败别闪误导）
     if (res?.ok === true) {
-      this.#flash({ x: el.cx, y: el.cy }, action === "setValue" ? "type" : "click", 12).catch(() => { /* 无碍 */ });
+      this.#flash({ x: el.cx, y: el.cy }, action === "setValue" ? "type" : "click", 18).catch(() => { /* 无碍 */ });
     }
     return res;
   }
@@ -567,7 +567,7 @@ export class WindowsDriver {
       this.native.setCursorPos(p.x, p.y);
       // 移动落点小环（0.7.3，用户要求「移动同鼠标发光」）：轻量小环，
       // 与点击同款跑马灯但半径更小、时长略短（0.8.3：320ms → 700ms）
-      this.#flash(p, "click", 9, { ms: FLASH_MS.move }).catch(() => { /* 无碍 */ });
+      this.#flash(p, "click", 13, { ms: FLASH_MS.move }).catch(() => { /* 无碍 */ });
       return { moved: { x, y } };
     });
   }
@@ -648,7 +648,7 @@ export class WindowsDriver {
       }
       this.native.mouseEvent(b.up, 0);
       // 拖拽落点发光（终点处，红色）——无碍失败
-      try { this.#flash(to, "click", 11).catch(() => {}); } catch { /* ignore */ }
+      try { this.#flash(to, "click", 16).catch(() => {}); } catch { /* ignore */ }
       return { dragged: { from: { x: fromX, y: fromY }, to: { x: toX, y: toY } } };
     });
   }
