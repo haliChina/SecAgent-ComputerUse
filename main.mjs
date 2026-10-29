@@ -140,14 +140,22 @@ export async function activate(api) {
       switch (action) {
         case "meta":
           return describeSettings();
+        // 0.8.7：R76+ 宿主通用插件设置页协议（PluginFormSettingsPage 行式渲染）。
+        // describeSettings() 返回组数组，包进 { groups } 供渲染器归一；values 供回显。
+        case "describe": {
+          const groups = describeSettings();
+          return { ok: true, groups, values: readConfig() };
+        }
         case "config":
           return readConfig();
         case "set": {
-          const merged = mergeConfig({ ...readConfig(), ...(args || {}) }).config;
+          const { config: merged, dropped } = mergeConfig({ ...readConfig(), ...(args || {}) });
           persistConfig(merged);
           if (args.omniEndpoint) manager.setEndpoint(merged.omniEndpoint);
           await extBridge.setEnabled(merged.extBridgeEnabled !== false).catch(() => {});
-          return merged;
+          // values 供宿主设置页回显；dropped 变 note 提示被清洗的键（如超范围数字）。
+          const note = dropped?.length ? `以下键已按取值范围修正：${dropped.join("、")}` : undefined;
+          return { ...merged, ok: true, values: merged, ...(note ? { note } : {}) };
         }
         case "reset":
           persistConfig({ ...DEFAULT_CONFIG });

@@ -131,8 +131,22 @@ test("原生设置 handler 支持 config / set / reset / meta", async () => {
       const next = await handler("set", { maxElements: 25, backend: "uia" });
       assert.equal(next.maxElements, 25);
       assert.equal(next.backend, "uia");
+      // 0.8.8：set 返回带 values/note（宿主 R76+ 通用设置页回显协议）
+      assert.deepEqual(next.values?.backend, "uia");
+      assert.equal(next.ok, true);
       const reset = await handler("reset");
       assert.equal(reset.backend, "auto");
+      // 0.8.8：describe 动作——宿主 PluginFormSettingsPage 行式渲染入口（PR16/R78）
+      const desc = await handler("describe");
+      assert.equal(desc.ok, true);
+      assert.ok(Array.isArray(desc.groups) && desc.groups.length >= 6, "组数组（每项含 fields）");
+      assert.ok(desc.groups.every((g) => Array.isArray(g.fields) && g.fields.length > 0), "每组有字段");
+      assert.ok(desc.groups[0].fields.every((f) => f.key && f.type && f.label), "字段必备 key/type/label");
+      assert.equal(desc.values?.backend, "auto", "values 供回显");
+      // set 超范围值被清洗并提示 note
+      const clamped = await handler("set", { uiaTimeoutMs: 5 });
+      assert.ok(clamped.values.uiaTimeoutMs >= 500, "低于下限被修正");
+      assert.match(clamped.note, /uiaTimeoutMs/, "dropped 键进 note");
     } finally {
       await dispose();
     }
