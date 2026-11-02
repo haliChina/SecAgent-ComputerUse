@@ -18,6 +18,7 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/浏�
 
 - **优先语义动作（0.8.4）**：按钮/菜单/勾选/展开/选项/输入框，先用 `act(elementId)`（invoke/toggle/expand/select/setValue）——直接操作元素，比鼠标点更稳、后台窗口也有效；元素清单会标注 ☑/▸/★/现值 帮你选目标。`act` 失效（STALE_STATE）就重新 inspect。
 - **优先元素地图**：点击给 `click` 传 **elementId**（inspect 的编号），坐标由系统给出；元素地图只在**裸坐标兜底**时才放弃，且界面一变立即重新 inspect。
+- **渐进感知优先简洁（0.8.9）**：backend=progressive 时先用简洁视图（前台·仅可交互），**找不到目标再逐级放宽**（`inspect({view:"full"})` → `"desktop-buttons"` → `"desktop"`）；档位越全越慢、干扰越多，够用就不升档。任务栏/桌面图标这类目标直接 `view:"desktop-buttons"`。
 - **坐标只有一套**：所有 x,y 一律相对**本次截图**左上角，与模型看到的图完全一致；系统已处理缩放与多显示器偏移，不要自己乘除或使用绝对屏幕坐标。
 - 需要视觉核对时用 `inspect(annotate=true)` 查看带编号框的标注图。
 
@@ -45,7 +46,7 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/浏�
 |---|---|
 | `doctor` / `settings` | 环境自检 / 设置控制台（参数、OmniParser 一键安装） |
 | `screenshot` | 截屏+坐标契约；视觉判断才截，连环截图不产生新信息 |
-| `inspect` | 元素清单；`backend`(auto/uia/extension/omniparser)、`annotate`、`scope`(foreground/desktop) |
+| `inspect` | 元素清单；`backend`(auto/progressive/uia/extension/omniparser)、`view`(simple/full/desktop-buttons/desktop，仅 progressive)、`annotate`、`scope`(foreground/desktop) |
 | `act` | **语义动作优先**：invoke/toggle/expand/select/setValue 按 elementId 直操元素（0.8.4） |
 | `click` | elementId 优先；或 x,y 兜底；`button`、`double` |
 | `type` / `key` | 输入文本（Unicode）/ 组合键（如 Ctrl+S） |

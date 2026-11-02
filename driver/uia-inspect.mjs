@@ -75,6 +75,7 @@ foreach ($el in $all) {
     cx      = [int][Math]::Round($r.X + $r.Width / 2)
     cy      = [int][Math]::Round($r.Y + $r.Height / 2)
     enabled = $c.IsEnabled
+    interactive = $isInteractive
     value   = $value
     toggleState  = $toggleState
     expandState  = $expandState
@@ -240,7 +241,9 @@ function cleanNumeric(rec) {
     },
     cx: Number(rec.cx) | 0,
     cy: Number(rec.cy) | 0,
-    enabled: rec.enabled !== false
+    enabled: rec.enabled !== false,
+    // 0.8.9：UIA 脚本上报的角色可交互标志（渐进式感知「仅可交互」档过滤依据）。
+    interactive: rec.interactive !== false
   };
   // 0.8.4 语义状态字段（inspect 脚本新增；旧测试桩没有则跳过）
   const rid = Array.isArray(rec.runtimeId) ? rec.runtimeId.map((n) => Math.round(Number(n) || 0)) : null;

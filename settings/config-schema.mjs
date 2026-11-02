@@ -18,6 +18,7 @@ export const SETTING_FIELDS = [
   { key: "backend", group: "perception", type: "select", default: "auto",
     options: [
       { value: "auto", label: "自动（UIA 优先，浏览器扩展 / OmniParser 兜底）" },
+      { value: "progressive", label: "渐进式（简洁优先：前台仅可交互 → 找不到自动升全）" },
       { value: "uia", label: "仅 UIA（Windows 系统控件）" },
       { value: "extension", label: "仅浏览器扩展（页面 DOM，需配对扩展）" },
       { value: "omniparser", label: "仅 OmniParser（视觉模型）" }

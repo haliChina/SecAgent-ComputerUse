@@ -335,11 +335,20 @@ export async function activate(api) {
         properties: {
           backend: {
             type: "string",
-            enum: ["auto", "uia", "extension", "omniparser"],
+            enum: ["auto", "progressive", "uia", "extension", "omniparser"],
             description:
               "缺省取设置；auto=UIA 优先，元素过少时回退浏览器扩展（已配对）再 OmniParser；" +
+              "progressive=渐进式感知（简洁优先：前台仅可交互元素，元素过少自动放宽到前台全部→全桌面；可配 view 手动点名档位）；" +
               "extension=浏览器页面 DOM 直读（毫秒级、真实结构，网页任务首选，需配对扩展）；" +
               "omniparser=本地视觉模型"
+          },
+          view: {
+            type: "string",
+            enum: ["simple", "full", "desktop-buttons", "desktop"],
+            description:
+              "仅 backend=progressive：视图档位。simple=前台·仅可交互（最简，默认）；" +
+              "full=前台·全部内容（含文本）；desktop-buttons=全桌面·仅可交互（任务栏/桌面图标）；" +
+              "desktop=全桌面·全部内容（最全最慢）。纪律：优先简洁档，找不到目标再逐级放宽"
           },
           annotate: { type: "boolean", description: "true 返回带编号框的标注图" },
           clickableOnly: { type: "boolean", description: "OmniParser 下是否只保留可点元素" },
@@ -362,6 +371,7 @@ export async function activate(api) {
           annotate: a.annotate === true,
           clickableOnly: a.clickableOnly,
           scope: a.scope,
+          view: a.view,
           tabId: a.tabId
         })
     )
