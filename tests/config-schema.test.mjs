@@ -99,3 +99,8 @@ test("mergeConfig 保留镜像字段", () => {
   assert.equal(config.hfMirror, "https://hf-mirror.com");
   assert.equal(config.pipIndexUrl, "");
 });
+
+test("0.8.9 backend 含 progressive 选项（渐进式感知）", () => {
+  const backend = SETTING_FIELDS.find((f) => f.key === "backend");
+  assert.ok(backend.options.some((o) => o.value === "progressive"));
+});

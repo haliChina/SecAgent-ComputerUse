@@ -97,3 +97,16 @@ test("findElement：命中与未命中", () => {
   assert.equal(findElement(map.elements, 0)?.name, "x");
   assert.equal(findElement(map.elements, 99), null);
 });
+
+test("0.8.9 UIA clickableOnly 过滤：interactive=false 剔除，缺省兼容", () => {
+  const els = [
+    { name: "确定", role: "Button", interactive: true, bbox: { x: 1, y: 1, w: 10, h: 8 } },
+    { name: "说明", role: "Text", interactive: false, bbox: { x: 2, y: 2, w: 10, h: 8 } }
+  ];
+  const m = buildElementMap(els, "uia", { clickableOnly: true });
+  assert.equal(m.total, 1);
+  assert.equal(m.elements[0].name, "确定");
+  // 旧数据（无 interactive 字段）→ clickable 恒 true，过滤为无操作
+  const legacy = buildElementMap([{ name: "旧文本", role: "Text", bbox: { x: 1, y: 1, w: 5, h: 5 } }], "uia", { clickableOnly: true });
+  assert.equal(legacy.total, 1, "旧数据不被误滤");
+});

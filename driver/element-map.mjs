@@ -24,7 +24,8 @@ export function normalizeUia(raw, index) {
     cx: raw.cx != null ? intv(raw.cx) : x + (w >> 1),
     cy: raw.cy != null ? intv(raw.cy) : y + (h >> 1),
     enabled: raw.enabled !== false,
-    clickable: true,
+    // 0.8.9：UIA 脚本上报 interactive（角色匹配可交互）。旧数据缺省 true 保持兼容。
+    clickable: raw.interactive !== false,
     source: "uia"
   };
   // 0.8.4：语义状态透传（inspect 采集；缺失时无该键 = 未知，不臆造）。
@@ -105,7 +106,9 @@ export function buildElementMap(rawList, source, { cap = DEFAULT_CAP, clickableO
     source === "extension" ? normalizeExtension :
     normalizeOmniParser;
   let recs = (rawList ?? []).map((r, i) => normalizer(r, i)).filter(Boolean);
-  if (source === "omniparser" && clickableOnly) recs = recs.filter((r) => r.clickable);
+  // 0.8.9：clickableOnly 过滤扩到 uia（渐进式感知的「仅可交互」档）。
+  // 旧脚本数据无 interactive 字段 → clickable 恒 true → 过滤为无操作，兼容。
+  if (clickableOnly && (source === "omniparser" || source === "uia")) recs = recs.filter((r) => r.clickable);
   const total = recs.length;
   const elements = recs.slice(0, cap).map((r, i) => ({ ...r, id: i }));
   return { elements, total, truncated: total > elements.length, source };

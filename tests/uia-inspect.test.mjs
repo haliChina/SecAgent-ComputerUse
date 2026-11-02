@@ -28,7 +28,8 @@ test("解析新版输出 {fgPid, elements} 并清洗字段", async () => {
   assert.deepEqual(elements[0], {
     name: "确定", role: "Button", automationId: "okBtn",
     bbox: { x: 100, y: 200, w: 80, h: 30 },
-    cx: 140, cy: 215, enabled: true
+    cx: 140, cy: 215, enabled: true,
+    interactive: true // 0.8.9：缺省视为可交互（旧脚本数据兼容）
   });
 });
 

@@ -389,7 +389,7 @@ export class WindowsDriver {
    * @param {boolean} [opts.clickableOnly] 缺省取设置 clickableOnly
    * @param {number} [opts.tabId] 目标标签页（仅 extension 后端；缺省取最近聚焦的浏览器标签页）
    */
-  async inspect({ backend, annotate = false, clickableOnly, scope, tabId } = {}) {
+  async inspect({ backend, annotate = false, clickableOnly, scope, view, tabId } = {}) {
     const cfg = this.#cfg();
     const useBackend = backend ?? cfg.backend ?? "auto";
     const useClickable = clickableOnly ?? cfg.clickableOnly ?? true;
@@ -400,7 +400,46 @@ export class WindowsDriver {
     let map = null;
     let uiaError = null;
     let uiaFgPid = 0;
-    if (useBackend === "uia" || useBackend === "auto") {
+
+    // 0.8.9 渐进式感知（用户提议）：给模型「简洁优先」的档位选择。
+    // 四档 = 范围（前台/全桌面）× 内容（仅可交互/全部）：
+    //   simple 前台·仅可交互 → full 前台·全部 → desktop-buttons 桌面·仅可交互 → desktop 桌面·全部
+    // 缺省自动链 simple→full→desktop：元素 ≥ minElements 即停在当前档
+    // （简洁视图够用就不升级）；view 手动点名则只用该档。
+    let progressiveInfo = null;
+    if (useBackend === "progressive") {
+      const VIEWS = {
+        simple: { scope: "foreground", clickableOnly: true, label: "简洁（前台·仅可交互元素）" },
+        full: { scope: "foreground", clickableOnly: false, label: "前台·全部内容（含文本）" },
+        "desktop-buttons": { scope: "desktop", clickableOnly: true, label: "全桌面·仅可交互（含任务栏/桌面图标）" },
+        desktop: { scope: "desktop", clickableOnly: false, label: "全桌面·全部内容" }
+      };
+      const named = VIEWS[view] ? view : null;
+      const chain = named ? [named] : ["simple", "full", "desktop"];
+      let lastError = null;
+      for (const step of chain) {
+        const conf = VIEWS[step];
+        try {
+          const uia = await inspectViaUia({
+            runner: this.uiaRunner,
+            timeout: cfg.uiaTimeoutMs,
+            scope: conf.scope
+          });
+          uiaFgPid = uia.foregroundPid;
+          map = buildElementMap(uia.elements, "uia", {
+            cap: cfg.maxElements,
+            clickableOnly: conf.clickableOnly
+          });
+          progressiveInfo = { view: step, label: conf.label, auto: !named, elements: map.total };
+          if (map.total >= (cfg.minElements ?? 3)) break; // 够用就停在简洁档
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      // 全链失败：progressive 点名了 UIA（非 auto 静默降级），让模型看到真实错误。
+      if (!map || (map.total === 0 && lastError)) throw lastError ?? new Error("渐进式感知：UIA 全部档位失败");
+      uiaError = null;
+    } else if (useBackend === "uia" || useBackend === "auto") {
       let uiaRaw = [];
       try {
         const uia = await inspectViaUia({
@@ -527,6 +566,13 @@ export class WindowsDriver {
         ? `\n📎 元素来自标签页「${(extTabInfo.title || "").slice(0, 60)}」（${(extTabInfo.url || "").slice(0, 100)}）。` +
           `若这不是你想操作的页面，先用 tabs 工具切换标签页再重新 inspect。`
         : "";
+    // 0.8.9 渐进式感知：当前视图标注 + 逐级放宽指引（给模型的「更多提示和选择」）。
+    const viewLine = progressiveInfo
+      ? `\n🔎 感知视图：${progressiveInfo.label}（元素 ${progressiveInfo.elements} 个${progressiveInfo.auto ? "，简洁优先自动选定" : "，按 view 指定"}）。` +
+          `找不到目标时逐级放宽：inspect({view:"full"})=前台全部内容；` +
+          `view:"desktop-buttons"=全桌面仅可交互（任务栏/桌面图标）；view:"desktop"=全桌面全部内容。` +
+          `纪律：优先简洁视图，够用就不升档（档位越全越慢、干扰越多）。`
+      : "";
     // 前台是宿主自身（0.5.4 实机踩坑：模型 focus 不到动态标题窗口，
     // 对着 SecAgent 自己的活动流点了 20+ 次）。此时仍返回元素（兼容
     // 自测场景），但醒目提示先 focus 目标窗口。
@@ -548,6 +594,7 @@ export class WindowsDriver {
           type: "text",
           text:
             selfWarning +
+            viewLine +
             tabLine +
             "\n" +
             this.#geometryText(image, capture) +
@@ -557,8 +604,8 @@ export class WindowsDriver {
         }
       ];
     }
-    const text = selfWarning + tabLine + describeElements(displayMap, geometry);
-    return warning || tabLine ? text + (warning || "") : text;
+    const text = selfWarning + viewLine + tabLine + describeElements(displayMap, geometry);
+    return warning || tabLine || viewLine ? text + (warning || "") : text;
   }
 
   async move(x, y) {

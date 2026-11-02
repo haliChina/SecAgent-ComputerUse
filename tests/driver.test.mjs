@@ -620,3 +620,89 @@ test("0.8.4 element-map 语义状态：☑/▾/★/值 标注与 runtimeId 透�
   assert.match(text, /值="/, "现值标注");
   assert.match(text, /…/, "超长截断");
 });
+
+// ---- 0.8.9：渐进式感知（progressive backend）----
+test("progressive 自动链：简洁档元素够多就停（不升级）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const calls = [];
+  const runner = async (script) => {
+    calls.push(script);
+    // 5 个可交互元素 ≥ minElements(3)——应停在 simple 档
+    return { stdout: JSON.stringify(Array.from({ length: 5 }, (_, i) => ({
+      name: `按钮${i}`, role: "Button", interactive: true,
+      bbox: { x: 10, y: 10 + i * 20, w: 40, h: 16 }, enabled: true
+    }))), stderr: "" };
+  };
+  const driver = new WindowsDriver({ native, uiaRunner: runner });
+  const out = await driver.inspect({ backend: "progressive" });
+  assert.equal(calls.length, 1, "只跑一档（simple）");
+  assert.match(out, /感知视图：简洁（前台·仅可交互元素）/);
+  assert.match(out, /inspect\(\{view:"full"\}\)/, "带升级指引");
+});
+
+test("progressive 自动链：简洁档元素过少自动升到 full", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const responses = [
+    // simple 档：2 个可交互（< minElements 3）→ 升级
+    JSON.stringify([
+      { name: "确定", role: "Button", interactive: true, bbox: { x: 1, y: 1, w: 10, h: 8 }, enabled: true },
+      { name: "取消", role: "Button", interactive: true, bbox: { x: 2, y: 2, w: 10, h: 8 }, enabled: true }
+    ]),
+    // full 档：10 个（含非交互文本）→ 停
+    JSON.stringify([
+      ...Array.from({ length: 4 }, (_, i) => ({ name: `按钮${i}`, role: "Button", interactive: true, bbox: { x: 1, y: 1, w: 10, h: 8 }, enabled: true })),
+      ...Array.from({ length: 6 }, (_, i) => ({ name: `说明文本${i}`, role: "Text", interactive: false, bbox: { x: 5, y: 5, w: 10, h: 8 }, enabled: true }))
+    ])
+  ];
+  let i = 0;
+  const runner = async () => ({ stdout: responses[i++], stderr: "" });
+  const driver = new WindowsDriver({ native, uiaRunner: runner });
+  const out = await driver.inspect({ backend: "progressive" });
+  assert.equal(i, 2, "simple 不够 → 升 full");
+  assert.match(out, /感知视图：前台·全部内容（含文本）/);
+  assert.match(out, /简洁优先自动选定/);
+  assert.match(out, /说明文本/, "full 档含非交互文本");
+});
+
+test("progressive 简洁档过滤：interactive=false 的文本不进清单", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const els = [
+    { name: "确定", role: "Button", interactive: true, bbox: { x: 1, y: 1, w: 10, h: 8 }, enabled: true },
+    { name: "大段说明", role: "Text", interactive: false, bbox: { x: 5, y: 5, w: 10, h: 8 }, enabled: true },
+    { name: "输入框", role: "Edit", interactive: true, bbox: { x: 9, y: 9, w: 10, h: 8 }, enabled: true },
+    { name: "标签", role: "Text", interactive: false, bbox: { x: 3, y: 3, w: 10, h: 8 }, enabled: true }
+  ];
+  const driver = new WindowsDriver({ native, uiaRunner: async () => ({ stdout: JSON.stringify(els), stderr: "" }) });
+  const out = await driver.inspect({ backend: "progressive", view: "simple" });
+  assert.match(out, /确定/);
+  assert.match(out, /输入框/);
+  assert.doesNotMatch(out, /大段说明/, "非交互文本被过滤");
+  assert.match(out, /按 view 指定/, "手动点名标注");
+});
+
+test("progressive view 手动点名 desktop-buttons 只跑该档", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const calls = [];
+  const runner = async (script) => {
+    calls.push(script);
+    return { stdout: JSON.stringify([
+      { name: "开始", role: "Button", interactive: true, bbox: { x: 1, y: 1, w: 10, h: 8 }, enabled: true },
+      { name: "任务栏图标", role: "Button", interactive: true, bbox: { x: 2, y: 2, w: 10, h: 8 }, enabled: true },
+      { name: "托盘", role: "Button", interactive: true, bbox: { x: 3, y: 3, w: 10, h: 8 }, enabled: true }
+    ]), stderr: "" };
+  };
+  const driver = new WindowsDriver({ native, uiaRunner: runner });
+  const out = await driver.inspect({ backend: "progressive", view: "desktop-buttons" });
+  assert.equal(calls.length, 1, "手动点名只跑一档");
+  assert.match(out, /全桌面·仅可交互/);
+});
+
+test("progressive 全链失败抛真实错误（点名了 UIA 不静默）", async () => {
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const runner = async () => { throw new Error("PowerShell 炸了"); };
+  const driver = new WindowsDriver({ native, uiaRunner: runner });
+  await assert.rejects(
+    () => driver.inspect({ backend: "progressive" }),
+    /PowerShell 炸了/
+  );
+});
