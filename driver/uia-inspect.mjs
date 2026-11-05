@@ -274,7 +274,17 @@ export async function actViaUia({ runner, runtimeId, action, value = null, timeo
   try {
     result = await run(encoded, timeout);
   } catch (error) {
-    return { ok: false, error: `UIA 动作执行失败：${error?.message ?? error}` };
+    // 0.8.10 超时=may-have-happened（借鉴 dsh-cua-pre）：PowerShell 被超时杀掉时，
+    // 动作可能已送达 UIA（或还在跑）——绝不谎报失败，调用方须先观察再决定，禁止自动重试。
+    const msg = String(error?.message ?? error);
+    if (/timeout|timed out|killed|ETIMEDOUT/i.test(msg)) {
+      return {
+        ok: false,
+        mayHaveApplied: true,
+        error: `TIMEOUT_MAY_HAVE_APPLIED: UIA 动作超时（${msg}），动作可能已经生效但结果未知。请先观察当前界面确认实际状态，不要盲目重试同一动作。`
+      };
+    }
+    return { ok: false, error: `UIA 动作执行失败：${msg}` };
   }
   const stdout = (result?.stdout ?? "").trim();
   if (!stdout) return { ok: false, error: "UIA 动作无输出（PowerShell 异常退出）" };

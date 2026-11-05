@@ -706,3 +706,122 @@ test("progressive 全链失败抛真实错误（点名了 UIA 不静默）", asy
     /PowerShell 炸了/
   );
 });
+
+test("0.8.10 写后作废：修改类动作后 act 强制刷新地图再解析元素", async () => {
+  let inspectCount = 0;
+  let actCount = 0;
+  const els = [
+    { role: "Button", name: "确定", bbox: { x: 40, y: 40, w: 20, h: 20 }, runtimeId: [1, 2, 3] }
+  ];
+  const decode = (enc) => Buffer.from(enc, "base64").toString("utf16le");
+  const runner = async (encoded) => {
+    const script = decode(encoded);
+    if (script.includes("$act")) {
+      actCount += 1;
+      return { stdout: JSON.stringify({ ok: true, found: true, action: "invoke" }) };
+    }
+    inspectCount += 1;
+    return { stdout: JSON.stringify({ fgPid: 123, elements: els }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" })
+  });
+  // 初始地图
+  await driver.inspect();
+  assert.equal(inspectCount, 1);
+  // act #0：地图新鲜，直接命中，无额外 inspect
+  await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(inspectCount, 1, "新鲜地图不重复 inspect");
+  assert.equal(actCount, 1);
+  // 修改类动作后地图作废 → 再 act 前强制刷新（inspect +1）
+  await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(inspectCount, 2, "作废地图触发强制刷新");
+  assert.equal(actCount, 2);
+  // inspect() 本身重置标记 → 后续 act 不再额外刷新
+  await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(inspectCount, 3, "inspect 后标记重置");
+});
+
+test("0.8.10 写后作废：点击后按编号点击前自动重查", async () => {
+  let inspectCount = 0;
+  const runner = async () => {
+    inspectCount += 1;
+    return { stdout: JSON.stringify({ fgPid: 1, elements: [
+      { role: "Button", name: "打开", bbox: { x: 10, y: 10, w: 20, h: 20 }, runtimeId: [7, 8] }
+    ] }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" })
+  });
+  await driver.inspect();
+  assert.equal(inspectCount, 1);
+  await driver.clickTarget({ elementId: 0 }); // 地图新鲜：不重查
+  assert.equal(inspectCount, 1);
+  await driver.clickTarget({ elementId: 0 }); // 上次点击作废了地图：强制重查
+  assert.equal(inspectCount, 2);
+});
+
+test("0.8.10 act 超时返回 TIMEOUT_MAY_HAVE_APPLIED（may-have-happened 语义）", async () => {
+  const els = [
+    { role: "Button", name: "确定", bbox: { x: 40, y: 40, w: 20, h: 20 }, runtimeId: [1, 2, 3] }
+  ];
+  const decode = (enc) => Buffer.from(enc, "base64").toString("utf16le");
+  const runner = async (encoded) => {
+    if (decode(encoded).includes("$act")) {
+      const err = new Error("Command timed out after 15000ms");
+      err.killed = true;
+      throw err;
+    }
+    return { stdout: JSON.stringify({ fgPid: 123, elements: els }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" })
+  });
+  await driver.inspect();
+  const res = await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(res.ok, false);
+  assert.equal(res.mayHaveApplied, true);
+  assert.match(res.error, /TIMEOUT_MAY_HAVE_APPLIED/);
+  assert.match(res.error, /不要盲目重试/);
+});
+
+test("0.8.10 act 超时也作废地图：下一个语义动作前重新 inspect", async () => {
+  let inspectCount = 0;
+  let phase = "normal";
+  const els = [
+    { role: "Button", name: "确定", bbox: { x: 40, y: 40, w: 20, h: 20 }, runtimeId: [1, 2, 3] }
+  ];
+  const decode = (enc) => Buffer.from(enc, "base64").toString("utf16le");
+  const runner = async (encoded) => {
+    const script = decode(encoded);
+    if (script.includes("$act")) {
+      if (phase === "timeout") {
+        const err = new Error("Process exited with ETIMEDOUT");
+        throw err;
+      }
+      return { stdout: JSON.stringify({ ok: true, found: true, action: "invoke" }) };
+    }
+    inspectCount += 1;
+    return { stdout: JSON.stringify({ fgPid: 123, elements: els }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" })
+  });
+  await driver.inspect();
+  assert.equal(inspectCount, 1);
+  phase = "timeout";
+  const res = await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(res.mayHaveApplied, true);
+  phase = "normal";
+  // 超时作废了地图 → 再 act 前强制刷新
+  await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(inspectCount, 2, "超时后地图作废，下个动作前重新 inspect");
+});

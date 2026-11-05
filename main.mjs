@@ -656,7 +656,7 @@ export async function activate(api) {
     {
       name: "act",
       description:
-        "语义动作（0.8.4，对齐 ZCode act）：按 elementId 直接操作 UIA 元素——invoke=点按（按钮/菜单项/超链接）、toggle=勾选/取消勾选、expand=展开或折叠（组合框/树节点）、select=选中选项、setValue=输入框直设文本（不经剪贴板、后台窗口也有效、无焦点抖动）。元素失效返回 found:false（STALE_STATE），重新 inspect 拿新编号再试。能 act 就别坐标点击（语义动作比鼠标点更稳）。",
+        "语义动作（0.8.4，对齐 ZCode act）：按 elementId 直接操作 UIA 元素——invoke=点按（按钮/菜单项/超链接）、toggle=勾选/取消勾选、expand=展开或折叠（组合框/树节点）、select=选中选项、setValue=输入框直设文本（不经剪贴板、后台窗口也有效、无焦点抖动）。元素失效返回 found:false（STALE_STATE），重新 inspect 拿新编号再试。能 act 就别坐标点击（语义动作比鼠标点更稳）。写后作废（0.8.10）：任何修改类动作（点击/输入/滚动/语义操作）之后旧编号不再可信，下一个 act/按编号点击前插件会自动刷新元素地图；act 超时返回 TIMEOUT_MAY_HAVE_APPLIED——动作可能已生效，先观察界面确认实际状态，不要盲目重试。",
       inputSchema: {
         type: "object",
         additionalProperties: false,

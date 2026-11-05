@@ -130,9 +130,13 @@ export class WindowsDriver {
     /** 最近一次发光标记的诊断（doctor 可查：via/ok/stage）。 */
     this.lastFlash = null;
     this.#lastMap = { elements: [], total: 0, truncated: false, source: "uia" };
+    /** 0.8.10 写后作废（借鉴 dsh-cua-pre）：上次 inspect 之后发生过修改类动作（点击/输入/
+     * 语义操作等），旧编号↔元素对应关系不再可信——下一个语义动作前强制刷新地图。 */
+    this.#mutated = false;
   }
 
   #lastMap;
+  #mutated;
 
   /** CUDA 门：探测一次并缓存。null=不可探测/未知（不拦截），true/false=探测结果。 */
   async #cudaGate() {
@@ -253,6 +257,8 @@ export class WindowsDriver {
   async act({ elementId, action, value } = {}) {
     if (elementId == null || typeof action !== "string")
       throw new Error("act 需要 elementId 与 action（invoke/toggle/expand/select/setValue）");
+    // 0.8.10 写后作废：上次修改类动作后 UI 可能已变，旧编号不可信——先刷新地图再解析。
+    if (this.#mutated) await this.inspect();
     const el = findElement(this.#lastMap.elements, elementId);
     if (!el)
       throw structuredError("STALE_STATE", `元素 #${elementId} 不在当前地图。请重新 inspect 后再 act。`);
@@ -274,6 +280,10 @@ export class WindowsDriver {
     // 落点发光：元素中心闪对应色（成功才闪；失败别闪误导）
     if (res?.ok === true) {
       this.#flash({ x: el.cx, y: el.cy }, action === "setValue" ? "type" : "click", 18).catch(() => { /* 无碍 */ });
+    }
+    // 写后作废：成功=UI 一定变了；超时=可能已生效（结果未知）——两种都作废旧地图。
+    if (res?.ok === true || String(res?.error || "").startsWith("TIMEOUT_MAY_HAVE_APPLIED")) {
+      this.#mutated = true;
     }
     return res;
   }
@@ -534,6 +544,7 @@ export class WindowsDriver {
 
     if (!map) map = buildElementMap([], "uia", { cap: cfg.maxElements });
     this.#lastMap = map;
+    this.#mutated = false; // 新地图即新事实：写后作废标记随之清除
 
     // 对模型一律输出 display 坐标；点击仍用 map 里保存的物理绝对坐标。
     const displayMap = toDisplayMap(map, { origin: capture.origin, scale: this.scale });
@@ -635,10 +646,11 @@ export class WindowsDriver {
     let abs, label;
     if (elementId != null) {
       let el = findElement(this.#lastMap.elements, elementId);
-      // 0.8.4 失效重查 fail-closed（对齐 ZCode STALE_STATE）：id 不在当前地图时
-      // 不直接报错——自动重 inspect 一次（UIA 遍历顺序稳定，同 id 大概率仍是
-      // 同一元素），仍找不到才结构化报错。绝不盲点来历不明的旧编号。
-      if (!el) {
+      // 0.8.4 失效重查 fail-closed（对齐 ZCode STALE_STATE）+ 0.8.10 写后作废：
+      // id 不在地图、或上次修改类动作后地图可能过期——都自动重 inspect 一次
+      //（UIA 遍历顺序稳定，同 id 大概率仍是同一元素），仍找不到才结构化报错。
+      // 绝不盲点来历不明的旧编号。
+      if (!el || this.#mutated) {
         await this.inspect();
         el = findElement(this.#lastMap.elements, elementId);
       }
@@ -663,6 +675,7 @@ export class WindowsDriver {
     });
     // 落点视觉标记（#12 → 0.7.3）：宿主发光优先、koffi 兜底；设置可关。
     this.#flash(abs, "click").catch(() => { /* 无碍 */ });
+    this.#mutated = true; // 写后作废：点击会改变 UI 状态
     return { clicked: { ...label, button, double } };
   }
 
@@ -710,6 +723,7 @@ export class WindowsDriver {
       this.native.mouseEvent(MOUSEEVENTF.wheel, n * WHEEL_DELTA);
       // 滚动轻量提示（0.7.3，用户要求）：方向箭头短促渐隐，不喧宾夺主
       this.#flash(p, "scroll", 10, { direction: n > 0 ? 1 : -1 }).catch(() => { /* 无碍 */ });
+      this.#mutated = true; // 写后作废：滚动可触发懒加载/列表变化
       return { scrolled: { x, y, amount: n } };
     });
   }
@@ -742,6 +756,7 @@ export class WindowsDriver {
           );
         // 输入落点发光（光标处，蓝色）——无碍失败
         try { this.#flash(this.native.cursorPos(), "type", 11).catch(() => {}); } catch { /* ignore */ }
+        this.#mutated = true; // 写后作废：输入改变控件内容
         return { typed: { length: text.length }, mode: "sendinput" };
       }
 
@@ -752,6 +767,7 @@ export class WindowsDriver {
         this.native.keybdEvent(0, code, KEYEVENTF_UNICODE);
         this.native.keybdEvent(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
       }
+      this.#mutated = true; // 写后作废：输入改变控件内容
       return { typed: { length: text.length }, mode: "legacy" };
     });
   }
@@ -786,6 +802,7 @@ export class WindowsDriver {
           .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join("+");
         this.#flash(this.native.cursorPos(), "chord", 12, { label }).catch(() => {});
       } catch { /* ignore */ }
+      this.#mutated = true; // 写后作废：组合键可触发任意 UI 变化
       return { pressed: text };
     });
   }
