@@ -270,6 +270,13 @@ export class WindowsDriver {
       );
     if (action === "setValue" && typeof value !== "string")
       throw new Error("act setValue 需要 value 字符串");
+    // 0.8.11 密码框防线（对齐 dsh-computer-use AXSecureTextField 拒绝）：
+    // 凭据不该由 agent 代填——密码只属于用户亲手输入。
+    if (action === "setValue" && el.isPassword === true)
+      throw structuredError(
+        "PASSWORD_FIELD_REFUSED",
+        `元素 #${elementId} 是密码框（UIA IsPassword），拒绝自动输入。请让用户亲手输入密码；如确属误判（如某些自绘 UI 把普通框标成密码框），可用坐标 type 并自行确认后果。`
+      );
     this.touchActivity(); // 语义操作也是「正在操作电脑」
     const res = await actViaUia({
       runner: this.uiaRunner,

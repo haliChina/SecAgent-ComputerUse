@@ -30,6 +30,8 @@ export function normalizeUia(raw, index) {
   };
   // 0.8.4：语义状态透传（inspect 采集；缺失时无该键 = 未知，不臆造）。
   if (Array.isArray(raw.runtimeId) && raw.runtimeId.length) rec.runtimeId = raw.runtimeId.map((n) => intv(n));
+  // 0.8.11：密码框标记透传（UIA IsPassword）——act setValue 拒绝自动输入。
+  if (raw.isPassword === true) rec.isPassword = true;
   if (typeof raw.value === "string" && raw.value !== "") rec.value = raw.value;
   if (raw.toggleState != null) rec.toggleState = String(raw.toggleState);
   if (raw.expandState != null) rec.expandState = String(raw.expandState);

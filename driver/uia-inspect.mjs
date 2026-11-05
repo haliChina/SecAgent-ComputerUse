@@ -76,6 +76,7 @@ foreach ($el in $all) {
     cy      = [int][Math]::Round($r.Y + $r.Height / 2)
     enabled = $c.IsEnabled
     interactive = $isInteractive
+    isPassword = [bool]$c.IsPassword
     value   = $value
     toggleState  = $toggleState
     expandState  = $expandState
@@ -248,6 +249,8 @@ function cleanNumeric(rec) {
   // 0.8.4 语义状态字段（inspect 脚本新增；旧测试桩没有则跳过）
   const rid = Array.isArray(rec.runtimeId) ? rec.runtimeId.map((n) => Math.round(Number(n) || 0)) : null;
   if (rid) out.runtimeId = rid;
+  // 0.8.11 密码框标记（act setValue 防线依据）
+  if (rec.isPassword === true) out.isPassword = true;
   if (typeof rec.value === "string" && rec.value !== "") out.value = rec.value;
   if (rec.toggleState != null) out.toggleState = String(rec.toggleState);
   if (rec.expandState != null) out.expandState = String(rec.expandState);

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WindowsDriver } from "../driver/win-driver.mjs";
+import { buildElementMap } from "../driver/element-map.mjs";
 import { decodePng } from "./decode-png.mjs";
 
 // 构造可注入的 fake native，记录所有系统调用；getDIBits 填入已知 BGRA。
@@ -884,4 +885,48 @@ test("0.8.11 waitScreen quiet：持续变化的画面超时未安静", async () 
   const r = await driver.waitScreen({ mode: "quiet", stableMs: 800, pollMs: 100, timeoutMs: 400 });
   assert.equal(r.waited, false);
   assert.match(r.detail, /未安静/);
+});
+
+test("0.8.11 密码框防线：act setValue 拒绝 isPassword 元素（PASSWORD_FIELD_REFUSED）", async () => {
+  const els = [
+    { role: "Edit", name: "用户名", bbox: { x: 40, y: 40, w: 20, h: 20 }, runtimeId: [1, 2, 3] },
+    { role: "Edit", name: "密码", bbox: { x: 90, y: 90, w: 20, h: 20 }, runtimeId: [4, 5, 6], isPassword: true }
+  ];
+  const decode = (enc) => Buffer.from(enc, "base64").toString("utf16le");
+  let actCalls = 0;
+  const runner = async (encoded) => {
+    if (decode(encoded).includes("$act")) {
+      actCalls += 1;
+      return { stdout: JSON.stringify({ ok: true, found: true, action: "setValue" }) };
+    }
+    return { stdout: JSON.stringify({ fgPid: 123, elements: els }) };
+  };
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: runner,
+    configProvider: () => ({ backend: "auto" })
+  });
+  await driver.inspect();
+  // 普通输入框正常 setValue
+  const ok = await driver.act({ elementId: 0, action: "setValue", value: "user" });
+  assert.equal(ok.ok, true);
+  // 密码框拒绝——绝不触达 UIA（actCalls 不增）
+  await assert.rejects(
+    () => driver.act({ elementId: 1, action: "setValue", value: "secret" }),
+    (err) => String(err.message).startsWith("PASSWORD_FIELD_REFUSED") && /亲手输入/.test(err.message)
+  );
+  assert.equal(actCalls, 1, "密码框未产生 UIA 调用");
+  // 非 setValue 动作不受限（如聚焦类语义操作）
+  const other = await driver.act({ elementId: 1, action: "invoke" });
+  assert.equal(other.ok, true);
+  assert.equal(actCalls, 2);
+});
+
+test("0.8.11 element-map：isPassword 透传且缺省无键", () => {
+  const map = buildElementMap([
+    { name: "密码", role: "Edit", bbox: { x: 0, y: 0, w: 10, h: 10 }, isPassword: true },
+    { name: "普通", role: "Edit", bbox: { x: 0, y: 20, w: 10, h: 10 }, isPassword: false }
+  ], "uia");
+  assert.equal(map.elements[0].isPassword, true);
+  assert.equal("isPassword" in map.elements[1], false, "false 不落键（缺省=未知）");
 });
