@@ -825,3 +825,63 @@ test("0.8.10 act 超时也作废地图：下一个语义动作前重新 inspect"
   await driver.act({ elementId: 0, action: "invoke" });
   assert.equal(inspectCount, 2, "超时后地图作废，下个动作前重新 inspect");
 });
+
+test("0.8.11 waitScreen quiet：固定画面按 stableMs 判安静", async () => {
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: uiaRunner(uiaEls)
+  });
+  const r = await driver.waitScreen({ mode: "quiet", stableMs: 200, pollMs: 100 });
+  assert.equal(r.waited, true);
+  assert.equal(r.mode, "quiet");
+  assert.ok(r.elapsedMs >= 0);
+  assert.equal(r.stableMs, 200);
+});
+
+test("0.8.11 waitScreen change：画面变化立即返回，未变化超时返回 waited:false", async () => {
+  // 可变画面：每次捕获像素值递增——用于模拟界面正在变化
+  let tick = 0;
+  const mutable = {
+    ...makeFakeNative({ w: 200, h: 150 }),
+    getDIBits: (dc, bmp, lines, bits) => {
+      tick += 1;
+      const v = tick * 5 % 256;
+      for (let p = 0; p < 200 * 150; p++) {
+        bits[p * 4] = v; bits[p * 4 + 1] = v; bits[p * 4 + 2] = v; bits[p * 4 + 3] = 255;
+      }
+      return lines;
+    }
+  };
+  const driver = new WindowsDriver({ native: mutable, uiaRunner: uiaRunner(uiaEls) });
+  const r = await driver.waitScreen({ mode: "change", pollMs: 100, timeoutMs: 2000 });
+  assert.equal(r.waited, true);
+  assert.equal(r.mode, "change");
+
+  // 固定画面 + change → 超时（waited:false 不是错误）
+  const still = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: uiaRunner(uiaEls)
+  });
+  const r2 = await still.waitScreen({ mode: "change", pollMs: 100, timeoutMs: 250 });
+  assert.equal(r2.waited, false);
+  assert.match(r2.detail, /未变化/);
+});
+
+test("0.8.11 waitScreen quiet：持续变化的画面超时未安静", async () => {
+  let tick = 0;
+  const mutable = {
+    ...makeFakeNative({ w: 200, h: 150 }),
+    getDIBits: (dc, bmp, lines, bits) => {
+      tick += 1;
+      const v = tick * 9 % 256;
+      for (let p = 0; p < 200 * 150; p++) {
+        bits[p * 4] = v; bits[p * 4 + 1] = v; bits[p * 4 + 2] = v; bits[p * 4 + 3] = 255;
+      }
+      return lines;
+    }
+  };
+  const driver = new WindowsDriver({ native: mutable, uiaRunner: uiaRunner(uiaEls) });
+  const r = await driver.waitScreen({ mode: "quiet", stableMs: 800, pollMs: 100, timeoutMs: 400 });
+  assert.equal(r.waited, false);
+  assert.match(r.detail, /未安静/);
+});

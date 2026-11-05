@@ -288,22 +288,60 @@ export async function activate(api) {
     guarded("screenshot", async () => await driver.screenshot())
   );
 
-  // 2.1) 等待：动作之间给界面渲染留时间，避免“点了没反应就接着输入”
+  // 2.1) 等待：条件等待优先（0.8.11），固定毫秒数保留兼容
   api.registerTool(
     {
       name: "wait",
       description:
-        "等待指定的毫秒数后再继续，用于界面加载/弹窗/网络请求。上限 10 秒。连续动作之间建议先 wait 300-800 毫秒。",
+        "等待。优先用条件等待（0.8.11）——window=等窗口出现/消失（title 正则匹配标题或进程名，mode=appear|vanish）；quiet=等画面安静（动画/加载停止）；change=等画面出现变化；条件满足立即返回，超时返回 waited:false 而不是报错。launch 后等窗口出现、关闭弹窗后等消失、操作后等安静，都用条件等待，比固定 sleep 准。仅当确实要固定间隔时才传 ms（50-10000 毫秒，如连续动作间 300-800 毫秒）。",
       inputSchema: {
         type: "object",
         additionalProperties: false,
         properties: {
-          ms: { type: "integer", description: "等待毫秒数，50-10000，默认 500" }
+          condition: { type: "string", enum: ["window", "quiet", "change"], description: "等待条件；不传则按 ms 固定等待" },
+          title: { type: "string", description: "condition=window 必填：窗口标题或进程名的正则，不区分大小写" },
+          mode: { type: "string", enum: ["appear", "vanish"], description: "window：等出现（默认）还是等消失" },
+          timeoutMs: { type: "integer", minimum: 100, maximum: 120000, description: "条件等待总超时，默认 15000" },
+          pollMs: { type: "integer", minimum: 100, maximum: 2000, description: "条件等待轮询间隔，默认 300" },
+          stableMs: { type: "integer", minimum: 100, description: "quiet：连续安静判定时长，默认 800" },
+          ms: { type: "integer", description: "固定等待毫秒数（不传 condition 时使用），50-10000，默认 500" }
         }
       },
       hidden: false
     },
     guarded("wait", async (a) => {
+      const condition = String(a.condition || "");
+      if (condition) {
+        const timeoutMs = Math.min(Math.max(Number(a.timeoutMs) || 15000, 100), 120000);
+        const pollMs = Math.min(Math.max(Number(a.pollMs) || 300, 100), 2000);
+        const start = Date.now();
+        driver.touchActivity();
+        if (condition === "window") {
+          const title = String(a.title || "");
+          if (!title.trim()) throw new Error("wait window 需要非空 title（窗口标题或进程名正则）");
+          let re;
+          try { re = new RegExp(title, "i"); } catch (error) { throw new Error(`title 正则无效：${error.message}`); }
+          const want = a.mode === "vanish" ? "vanish" : "appear";
+          for (;;) {
+            const list = await listWindows({ timeout: readConfig().uiaTimeoutMs });
+            const hit = list.some((w) => re.test(w.title) || re.test(w.name));
+            if (want === "appear" ? hit : !hit)
+              return { waited: true, condition, mode: want, elapsedMs: Date.now() - start };
+            if (Date.now() - start >= timeoutMs)
+              return {
+                waited: false, condition, mode: want, elapsedMs: Date.now() - start,
+                detail: want === "appear" ? "超时内窗口未出现" : "超时内窗口未关闭",
+                windows: list.slice(0, 8).map((w) => ({ title: w.title.slice(0, 60), name: w.name }))
+              };
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+            driver.touchActivity();
+          }
+        }
+        if (condition === "quiet" || condition === "change")
+          return await driver.waitScreen({ mode: condition, timeoutMs, pollMs, stableMs: a.stableMs });
+        throw new Error('wait condition 必须是 "window"|"quiet"|"change"');
+      }
+      // 固定等待（兼容旧用法）：条件等待覆盖不了的纯间隔场景。
       const ms = a.ms == null ? 500 : asInt(a.ms, "ms");
       const clamped = Math.min(10000, Math.max(50, ms));
       await new Promise((resolve) => setTimeout(resolve, clamped));

@@ -11,6 +11,7 @@
 //   - inspect 列出的元素 bbox 同样是 display 坐标，按 elementId 点击时直接用
 //     内部保存的绝对中心点，模型全程不接触物理坐标。
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { encodePNG } from "./png.mjs";
 import { computeScale, scaleImage } from "./scale.mjs";
 import { parseChord, isModifier } from "./keycodes.mjs";
@@ -805,6 +806,61 @@ export class WindowsDriver {
       this.#mutated = true; // 写后作废：组合键可触发任意 UI 变化
       return { pressed: text };
     });
+  }
+
+  /** 0.8.11 画面签名：原始捕获按 256 字节步长采样后的 sha256（条件等待用）。
+   * 采样既压计算量（4K 原始 ~33MB → 采样 ~130KB），又对光标闪烁、
+   * 单像素动画等噪声不敏感；安静判定另有 stableMs 时长兜底。 */
+  async #screenSignature() {
+    const { rgba } = await this.#capture();
+    const step = 256;
+    const n = Math.max(1, Math.ceil(rgba.length / step));
+    const buf = Buffer.allocUnsafe(n);
+    for (let i = 0; i < n; i += 1) buf[i] = rgba[i * step];
+    return createHash("sha256").update(buf).digest("hex");
+  }
+
+  /**
+   * 0.8.11 画面条件等待（借鉴 dsh-desktop-sidecar desktop_wait）：把「等」做进
+   * 工具里，免模型自己跑多轮截图轮询——更准也更快。超时是合法结果而非错误。
+   * @param {"quiet"|"change"} mode quiet=画面安静；change=出现变化
+   * @param {number} [timeoutMs=15000] 总超时（100ms~120s）
+   * @param {number} [pollMs=300] 轮询间隔（100ms~2s）
+   * @param {number} [stableMs=800] quiet：连续安静的判定时长
+   */
+  async waitScreen({ mode = "quiet", timeoutMs = 15000, pollMs = 300, stableMs = 800 } = {}) {
+    const deadline = Date.now() + Math.min(Math.max(Number(timeoutMs) || 15000, 100), 120000);
+    const poll = Math.min(Math.max(Number(pollMs) || 300, 100), 2000);
+    const start = Date.now();
+    this.touchActivity();
+    if (mode === "change") {
+      const baseline = await this.#screenSignature();
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, poll));
+        this.touchActivity();
+        const sig = await this.#screenSignature();
+        if (sig !== baseline)
+          return { waited: true, mode, elapsedMs: Date.now() - start };
+        if (Date.now() >= deadline)
+          return { waited: false, mode, elapsedMs: Date.now() - start, detail: "超时内画面未变化" };
+      }
+    }
+    // quiet：签名持续 stableMs 不变即安静。
+    const stableLimit = Math.max(Number(stableMs) || 800, poll);
+    let lastSig = null;
+    let lastChange = Date.now();
+    for (;;) {
+      const sig = await this.#screenSignature();
+      if (sig !== lastSig) {
+        lastSig = sig;
+        lastChange = Date.now();
+      } else if (Date.now() - lastChange >= stableLimit) {
+        return { waited: true, mode, elapsedMs: Date.now() - start, stableMs: stableLimit };
+      }
+      if (Date.now() >= deadline)
+        return { waited: false, mode, elapsedMs: Date.now() - start, detail: "超时内画面未安静" };
+      await new Promise((resolve) => setTimeout(resolve, Math.min(poll, Math.max(deadline - Date.now(), 0))));
+    }
   }
 }
 
