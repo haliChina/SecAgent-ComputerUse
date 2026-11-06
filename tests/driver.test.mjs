@@ -35,6 +35,7 @@ function makeFakeNative({ w = 8, h = 6, origin = { x: 0, y: 0 }, supports = true
       return lines;
     },
     setCursorPos: (x, y) => rec("setCursorPos", x, y),
+    cursorPos: () => ({ x: 4, y: 3 }),
     mouseEvent: (flags, data) => rec("mouseEvent", flags, data),
     keybdEvent: (vk, scan, flags) => rec("keybdEvent", vk, scan, flags),
     mapVirtualKey: (vk) => vk * 2
@@ -501,7 +502,7 @@ test("0.8.1 徽标：动作 touch 宿主 agentActivity（独立于发光开关�
   await driver.inspect(); // 建元素地图（elementId 依赖最近一次 inspect）
   await driver.clickTarget({ elementId: 0 }); // click(位置参数) 转发到 clickTarget
   assert.equal(activityCalls.length, 1, "click 触发一次徽标 touch");
-  assert.deepEqual(activityCalls[0], { active: true });
+  assert.deepEqual(activityCalls[0], { active: true, label: "点击" }); // 0.8.13 起带动作名
   // active=false（会话结束）路径
   driver.touchActivity(false);
   assert.equal(activityCalls.length, 2);
@@ -929,4 +930,50 @@ test("0.8.11 element-map：isPassword 透传且缺省无键", () => {
   ], "uia");
   assert.equal(map.elements[0].isPassword, true);
   assert.equal("isPassword" in map.elements[1], false, "false 不落键（缺省=未知）");
+});
+
+test("0.8.13 徽标动作名：点击/组合键/拖拽/act 透传到 hostActivity", async () => {
+  const activityCalls = [];
+  const native = makeFakeNative({ w: 200, h: 150 });
+  const decode = (enc) => Buffer.from(enc, "base64").toString("utf16le");
+  const runner = async (encoded) => {
+    if (decode(encoded).includes("$act"))
+      return { stdout: JSON.stringify({ ok: true, found: true, action: "invoke" }) };
+    return { stdout: JSON.stringify({ fgPid: 1, elements: [
+      { role: "Button", name: "打开", bbox: { x: 10, y: 10, w: 20, h: 20 }, runtimeId: [7, 8] }
+    ] }) };
+  };
+  const driver = new WindowsDriver({
+    native,
+    uiaRunner: runner,
+    hostActivity: (input) => activityCalls.push({ ...input })
+  });
+  // 点击：flash kind=click → 「点击」
+  await driver.click(50, 50);
+  assert.equal(activityCalls.at(-1).label, "点击");
+  // 组合键：flash kind=chord + extra.label → 「按 Ctrl+C」
+  await driver.chord("ctrl+c");
+  assert.equal(activityCalls.at(-1).label, "按 Ctrl+C");
+  // 拖拽：extra.badge 优先 → 「拖拽」
+  await driver.drag(10, 10, 40, 40);
+  assert.equal(activityCalls.at(-1).label, "拖拽");
+  // act 成功：badge=act·invoke
+  await driver.inspect();
+  await driver.act({ elementId: 0, action: "invoke" });
+  assert.equal(activityCalls.at(-1).label, "act·invoke");
+  // 无 label 的 touch（如入口 touch）不带 label 键
+  driver.touchActivity();
+  assert.equal("label" in activityCalls.at(-1), false);
+});
+
+test("0.8.13 waitScreen 轮询 touch 带「等待界面」", async () => {
+  const activityCalls = [];
+  const driver = new WindowsDriver({
+    native: makeFakeNative({ w: 200, h: 150 }),
+    uiaRunner: uiaRunner(uiaEls),
+    hostActivity: (input) => activityCalls.push({ ...input })
+  });
+  await driver.waitScreen({ mode: "quiet", stableMs: 200, pollMs: 100 });
+  assert.ok(activityCalls.length >= 1);
+  assert.ok(activityCalls.every((c) => c.label === "等待界面"));
 });

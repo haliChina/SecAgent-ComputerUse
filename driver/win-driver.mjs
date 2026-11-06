@@ -210,7 +210,16 @@ export class WindowsDriver {
    * @returns {Promise<{via:string,ok:boolean,stage?:string,error?:string}>}
    */
   async #flash(abs, kind = "click", radius = 22, extra = null) {
-    this.touchActivity(); // 徽标随动作 touch（独立于发光开关）
+    // 徽标动作名（0.8.13）：用户看徽标即知 Agent 在干什么。随 #flash touch（独立于发光开关）。
+    const badgeLabel =
+      extra?.badge ? String(extra.badge) :
+      kind === "chord" && extra?.label ? `按 ${extra.label}` :
+      kind === "click" ? "点击" :
+      kind === "type" ? "输入" :
+      kind === "scroll" ? "滚动" :
+      kind === "focus" ? "切换窗口" :
+      "";
+    this.touchActivity(true, badgeLabel);
     const cfg = this.#cfg();
     if (cfg.actionFlash === false || (cfg.actionFlash == null && cfg.clickFlash === false))
       return (this.lastFlash = { via: "off", ok: false, reason: "actionFlash/clickFlash=false" });
@@ -287,7 +296,7 @@ export class WindowsDriver {
     });
     // 落点发光：元素中心闪对应色（成功才闪；失败别闪误导）
     if (res?.ok === true) {
-      this.#flash({ x: el.cx, y: el.cy }, action === "setValue" ? "type" : "click", 18).catch(() => { /* 无碍 */ });
+      this.#flash({ x: el.cx, y: el.cy }, action === "setValue" ? "type" : "click", 18, { badge: `act·${action}` }).catch(() => { /* 无碍 */ });
     }
     // 写后作废：成功=UI 一定变了；超时=可能已生效（结果未知）——两种都作废旧地图。
     if (res?.ok === true || String(res?.error || "").startsWith("TIMEOUT_MAY_HAVE_APPLIED")) {
@@ -297,15 +306,16 @@ export class WindowsDriver {
   }
 
   /** 0.8.1：touch 宿主「正在操作电脑」徽标（active=true 续期；active=false 隐藏）。
+   * 0.8.13 label：徽标第二行显示当前动作名（如「点击」「按 Ctrl+C」），用户可循轨迹。
    * mouse/key 动作经 #flash 自动 touch；launch/focus 等非 driver 动作由 main.mjs 手动调用。 */
-  touchActivity(active = true) {
+  touchActivity(active = true, label) {
     if (typeof this.hostActivity !== "function") {
       this.lastActivity = { via: "none", ok: false, reason: "宿主无 api.agentActivity（版本过旧）" };
       return this.lastActivity;
     }
     try {
-      this.hostActivity({ active: active === true });
-      this.lastActivity = { via: "host", ok: true, active: active === true };
+      this.hostActivity({ active: active === true, ...(typeof label === "string" && label ? { label } : {}) });
+      this.lastActivity = { via: "host", ok: true, active: active === true, ...(label ? { label } : {}) };
     } catch (error) {
       this.lastActivity = { via: "host", ok: false, error: String(error?.message ?? error) };
     }
@@ -716,7 +726,7 @@ export class WindowsDriver {
       }
       this.native.mouseEvent(b.up, 0);
       // 拖拽落点发光（终点处，红色）——无碍失败
-      try { this.#flash(to, "click", 16).catch(() => {}); } catch { /* ignore */ }
+      try { this.#flash(to, "click", 16, { badge: "拖拽" }).catch(() => {}); } catch { /* ignore */ }
       return { dragged: { from: { x: fromX, y: fromY }, to: { x: toX, y: toY } } };
     });
   }
@@ -839,12 +849,12 @@ export class WindowsDriver {
     const deadline = Date.now() + Math.min(Math.max(Number(timeoutMs) || 15000, 100), 120000);
     const poll = Math.min(Math.max(Number(pollMs) || 300, 100), 2000);
     const start = Date.now();
-    this.touchActivity();
+    this.touchActivity(true, "等待界面");
     if (mode === "change") {
       const baseline = await this.#screenSignature();
       for (;;) {
         await new Promise((resolve) => setTimeout(resolve, poll));
-        this.touchActivity();
+        this.touchActivity(true, "等待界面");
         const sig = await this.#screenSignature();
         if (sig !== baseline)
           return { waited: true, mode, elapsedMs: Date.now() - start };
