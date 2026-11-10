@@ -134,6 +134,47 @@ export async function activate(api) {
   }
   if (initial.extBridgeEnabled !== false) await extBridge.start().catch(() => {});
 
+  // 宿主设置页的服务面板：把控制台的「状态胶囊 + 进度条 + 操作按钮」
+  // 归一成宿主通用协议（phase/label/message/progress/facts/actions）。
+  function omniPanelStatus() {
+    const st = manager.status();
+    const labels = { "not-installed": "未安装", installing: "安装中", installed: "已安装", starting: "启动中", running: "运行中", stopped: "已停止", error: "错误" };
+    const busy = st.phase === "installing" || st.phase === "starting";
+    return {
+      phase: st.phase || "not-installed",
+      label: labels[st.phase] || st.phase,
+      message: st.message || "",
+      ...(st.phase === "installing" && typeof st.progress === "number" ? { progress: st.progress } : {}),
+      facts: st.endpoint ? [{ label: "服务地址", value: String(st.endpoint) }] : [],
+      actions: [
+        { id: "omni-install", label: "一键安装并启动", primary: true, disabled: busy },
+        { id: "omni-start", label: "启动", disabled: busy || st.phase === "running" || st.phase === "not-installed" },
+        { id: "omni-stop", label: "停止", disabled: st.phase !== "running" && st.phase !== "starting" },
+        { id: "omni-uninstall", label: "卸载", danger: true, disabled: busy, confirm: "卸载会删除虚拟环境与权重，确定继续？" }
+      ]
+    };
+  }
+
+  function extPanelStatus() {
+    const st = extBridge.status();
+    const pending = st.pendingApproval;
+    const facts = [
+      ...(st.port ? [{ label: "端口", value: String(st.port) }] : []),
+      ...(st.client ? [{ label: "扩展", value: `${st.client.extName} · ${st.client.browser}` }] : [])
+    ];
+    return {
+      phase: st.connected ? "connected" : pending ? "pending" : st.running ? "waiting" : "stopped",
+      label: st.connected ? "已连接" : pending ? "等待允许" : st.running ? "等待扩展" : "未启用",
+      message: st.connected ? "网页元素走 DOM 直读，比截图识别更快更准。" : pending ? `待允许：${pending.extName} · ${pending.browser}` : "",
+      facts,
+      actions: [
+        ...(pending ? [{ id: "ext-approve", label: "允许连接", primary: true }, { id: "ext-reject", label: "拒绝", danger: true }] : []),
+        { id: "ext-reset", label: "重置配对码", confirm: "重置后已连接的扩展会断开，确定继续？" },
+        ...(st.connected ? [{ id: "ext-untrust", label: "清除信任", danger: true }] : [])
+      ]
+    };
+  }
+
   // 原生设置 handler（宿主未来在设置页渲染表单时使用；当前用 HTTP 控制台）。
   if (typeof api.registerSettingsHandler === "function") {
     api.registerSettingsHandler("computer-use-console", async (action, args = {}) => {
@@ -144,8 +185,18 @@ export async function activate(api) {
         // describeSettings() 返回组数组，包进 { groups } 供渲染器归一；values 供回显。
         case "describe": {
           const groups = describeSettings();
-          return { ok: true, groups, values: readConfig() };
+          return {
+            ok: true, groups, values: readConfig(),
+            panels: [
+              { id: "omni", title: "本地视觉服务", description: "UIA 覆盖不到自绘界面时，用本地视觉模型兜底。", statusAction: "omni-ui", pollMs: 2000 },
+              { id: "extension", title: "浏览器扩展桥", description: "与「SecAgent 浏览器桥」配对后，网页元素走 DOM 直读。", statusAction: "ext-ui", pollMs: 2000 }
+            ]
+          };
         }
+        case "omni-ui":
+          return omniPanelStatus();
+        case "ext-ui":
+          return extPanelStatus();
         case "config":
           return readConfig();
         case "set": {
