@@ -1,7 +1,8 @@
 // SecAgent Computer Use 插件入口。
 // 由宿主动态 import 并调用 activate(api)。
 import { WindowsDriver } from "./driver/win-driver.mjs";
-import { createKoffiNative } from "./driver/win-driver.mjs";
+import { createKoffiNative, structuredError } from "./driver/win-driver.mjs";
+import { validateSequenceRequest, sequenceNeedsConfirm, runSequence } from "./driver/sequence.mjs";
 import { runDoctor, formatDoctorReport } from "./driver/doctor.mjs";
 import { listWindows, focusWindow, readClipboard, writeClipboard, launchApp, listApps, matchApps } from "./driver/system-ops.mjs";
 import { mergeConfig, describeSettings, DEFAULT_CONFIG } from "./settings/config-schema.mjs";
@@ -804,6 +805,113 @@ export async function activate(api) {
       if (typeof a.keys !== "string" || !a.keys.trim())
         throw new Error("key 需要 keys，例如 ctrl+c");
       return await driver.chord(a.keys);
+    })
+  );
+
+  // 9.1) 批动作序列（0.9.1，学习 dsh-pilot：把往返从 N 次降到 1 次）
+  api.registerTool(
+    {
+      name: "sequence",
+      description:
+        "批动作：把多个已确认的机械步骤（click/type/key/act/scroll/move/drag/wait）合成一次调用，批末统一回拍一张——N 次往返变 1 次。适用：已看清屏幕、剩下全是不需要中途观察的操作（如「点输入框→打字→回车」）。不适用：每步都要看结果再决定的场景（老实用单动作）。安全：dryRun=true 只列计划不执行；risk 声明 medium/high 需带 confirm:true（act setValue/clear 自动升 medium）；默认任一步失败立即停止。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["steps"],
+        properties: {
+          steps: {
+            type: "array",
+            minItems: 1,
+            description: "步骤数组，顺序执行",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["action"],
+              properties: {
+                action: { type: "string", enum: ["click", "move", "drag", "scroll", "act", "type", "key", "wait"] },
+                note: { type: "string", description: "这步在干嘛（≤80 字符，结果里回显）" },
+                settleMs: { type: "integer", description: "此步后等待毫秒（0-5000）" },
+                // click / move / scroll / drag / act
+                elementId: { type: "integer" },
+                x: { type: "integer" },
+                y: { type: "integer" },
+                button: { type: "string", enum: ["left", "right", "middle"] },
+                double: { type: "boolean" },
+                amount: { type: "integer" },
+                from: pointSchema(),
+                to: pointSchema(),
+                actAction: { type: "string", description: "act 步骤的动作（invoke/toggle/expand/select/setValue）" },
+                value: { type: "string" },
+                // type / key / wait
+                text: { type: "string" },
+                keys: { type: "string" },
+                ms: { type: "integer" }
+              }
+            }
+          },
+          risk: { type: "string", enum: ["low", "medium", "high"], description: "风险声明；medium/high 需 confirm" },
+          confirm: { type: "boolean", description: "确认执行 medium/high 批次" },
+          dryRun: { type: "boolean", description: "只校验并列计划，不执行" },
+          stopOnError: { type: "boolean", description: "默认 true：失败即停" },
+          capture: { type: "string", enum: ["end", "none"], description: "批末回拍（默认 end）" },
+          settleMs: { type: "integer", description: "批末回拍前等待（默认 750）" }
+        }
+      },
+      hidden: false
+    },
+    guarded("sequence", async (a) => {
+      let plan;
+      try {
+        plan = validateSequenceRequest(a, readConfig());
+      } catch (error) {
+        throw structuredError("INVALID_SEQUENCE", error.message);
+      }
+      const planText = plan.steps
+        .map((s, i) => `${i + 1}. ${s.action}${s.note ? `（${s.note}）` : ""}`)
+        .join("\n");
+      if (a.dryRun === true)
+        return {
+          dryRun: true, risk: plan.risk, steps: plan.steps.length,
+          needsConfirm: sequenceNeedsConfirm(plan),
+          ...(plan.autoUpgraded ? { autoUpgraded: plan.autoUpgraded } : {}),
+          plan: planText
+        };
+      if (sequenceNeedsConfirm(plan) && a.confirm !== true)
+        throw structuredError(
+          "SEQUENCE_NEEDS_CONFIRM",
+          `该批次风险 ${plan.risk}${plan.autoUpgraded ? `（${plan.autoUpgraded}）` : ""}——确认后带 confirm:true 重发。计划：\n${planText}`
+        );
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const results = await runSequence(plan, async (action, s) => {
+        if (action === "click") {
+          const opts = { button: s.button ?? "left", double: s.double === true };
+          if (s.elementId != null) opts.elementId = asInt(s.elementId, "elementId");
+          else { opts.x = asInt(s.x, "x"); opts.y = asInt(s.y, "y"); }
+          return await driver.click(opts);
+        }
+        if (action === "move") return await driver.move(asInt(s.x, "x"), asInt(s.y, "y"));
+        if (action === "drag")
+          return await driver.drag(asInt(s.from?.x, "from.x"), asInt(s.from?.y, "from.y"), asInt(s.to?.x, "to.x"), asInt(s.to?.y, "to.y"), s.button ?? "left");
+        if (action === "scroll") {
+          const amount = s.amount != null ? asInt(s.amount, "amount") : readConfig().defaultScrollSteps;
+          return await driver.scroll(asInt(s.x, "x"), asInt(s.y, "y"), amount);
+        }
+        if (action === "act") return await driver.act({ elementId: s.elementId, action: s.actAction, value: s.value });
+        if (action === "type") return await driver.type(s.text);
+        if (action === "key") return await driver.chord(s.keys);
+        if (action === "wait") { await sleep(s.ms); return { waited: s.ms }; }
+        throw new Error(`sequence 未知动作 ${action}`);
+      });
+      const ok = results.filter((r) => r.ok).length;
+      const summary = {
+        sequence: { steps: results.length, ok, failed: results.length - ok, risk: plan.risk },
+        results
+      };
+      const text = { type: "text", text: JSON.stringify(summary) };
+      if (plan.capture === "none" || ok === 0) return text;
+      if (plan.endSettleMs > 0) await sleep(plan.endSettleMs);
+      const shot = await driver.screenshot();
+      return [text, ...shot];
     })
   );
 

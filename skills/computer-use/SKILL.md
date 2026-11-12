@@ -50,6 +50,7 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/浏�
 | `act` | **语义动作优先**：invoke/toggle/expand/select/setValue 按 elementId 直操元素（0.8.4） |
 | `click` | elementId 优先；或 x,y 兜底；`button`、`double` |
 | `type` / `key` | 输入文本（Unicode）/ 组合键（如 Ctrl+S） |
+| `sequence` | **批动作**（0.9.1）：已确认的机械步骤合并一次调用（click/type/key/act/scroll/move/drag/wait），批末自动回拍——N 次往返变 1 次；`dryRun` 列计划；risk medium/high 需 `confirm`；失败即停 |
 | `move` / `drag` / `scroll` | 移动 / 拖拽（from→to）/ 滚动 |
 | `launch` / `apps` / `focus` / `windows` | 启动应用 / 查应用名 / 切窗口 / 列窗口 |
 | `tabs` / `read_page` | 浏览器标签页 / 读页面文本（需配对扩展） |

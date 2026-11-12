@@ -882,7 +882,7 @@ export class WindowsDriver {
 }
 
 /** 0.8.4：结构化错误（对齐 ZCode 错误码风格）——message 前缀=码，agent 可按码分支。 */
-function structuredError(code, message) {
+export function structuredError(code, message) {
   const err = new Error(`${code}: ${message}`);
   err.code = code;
   return err;
