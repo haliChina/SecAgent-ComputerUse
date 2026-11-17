@@ -333,11 +333,32 @@ export async function activate(api) {
     {
       name: "screenshot",
       description:
-        "截取当前整个屏幕（含多显示器）并把图片直接提供给模型，同时返回坐标契约说明（截图尺寸/物理分辨率/缩放系数/虚拟屏原点）。仅在需要视觉判断（布局/图像内容/坐标确认）时调用；文本信息优先 inspect/read_page，连环截图不产生新信息。动作后的收尾验证用一次截图即可。",
+        "截取屏幕并把图片直接提供给模型，同时返回坐标契约说明（截图尺寸/物理分辨率/缩放系数/虚拟屏原点）。默认截整个虚拟屏幕（含多显示器）；传 display（displays 工具返回的索引）只截该屏——多屏/虚拟屏场景聚焦目标屏可显著减少视觉噪音与上下文体积，此时坐标契约以该屏为原点。仅在需要视觉判断（布局/图像内容/坐标确认）时调用；文本信息优先 inspect/read_page，连环截图不产生新信息。动作后的收尾验证用一次截图即可。",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          display: { type: "integer", description: "可选。displays 工具返回的显示器索引——只截该屏；缺省截整个虚拟屏幕（含全部显示器）" }
+        }
+      },
+      hidden: false
+    },
+    guarded("screenshot", async (args = {}) => await driver.screenshot(args.display))
+  );
+
+  // 2.0) 显示器枚举（0.9.2 虚拟屏支持）
+  api.registerTool(
+    {
+      name: "displays",
+      description:
+        "枚举显示器：索引、设备名、设备描述（识别虚拟屏，如 Virtual Display Driver/Parsec 等）、是否主屏、屏幕矩形与工作区（虚拟屏坐标系）。多屏或使用虚拟屏工作区时，先用本工具了解布局，再 screenshot(display) 聚焦目标屏。",
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       hidden: false
     },
-    guarded("screenshot", async () => await driver.screenshot())
+    guarded("displays", async () => {
+      const list = await driver.listDisplays();
+      return [{ type: "text", text: JSON.stringify(list, null, 2) }];
+    })
   );
 
   // 2.1) 等待：条件等待优先（0.8.11），固定毫秒数保留兼容

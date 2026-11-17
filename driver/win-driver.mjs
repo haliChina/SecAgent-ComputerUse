@@ -335,14 +335,25 @@ export class WindowsDriver {
     }
   }
 
-  /** 捕获整个虚拟屏幕，返回原始 RGBA（含多显示器）。 */
-  async #capture() {
+  /** 捕获整个虚拟屏幕，返回原始 RGBA（含多显示器）。
+   * display 参数：displays() 返回的 index——只截该屏（虚拟屏场景下
+   * 聚焦 Agent 工作屏，减少视觉噪音与上下文体积）。 */
+  async #capture(display) {
     return await this.#withThreadDpi(async () => {
       const n = this.native;
-      const originX = n.metrics(SM_XVIRTUALSCREEN);
-      const originY = n.metrics(SM_YVIRTUALSCREEN);
-      const width = n.metrics(SM_CXVIRTUALSCREEN);
-      const height = n.metrics(SM_CYVIRTUALSCREEN);
+      let originX = n.metrics(SM_XVIRTUALSCREEN);
+      let originY = n.metrics(SM_YVIRTUALSCREEN);
+      let width = n.metrics(SM_CXVIRTUALSCREEN);
+      let height = n.metrics(SM_CYVIRTUALSCREEN);
+      if (display !== undefined) {
+        const monitors = n.displays();
+        const target = monitors.find((m) => m.index === display);
+        if (!target) throw new Error(`没有索引为 ${display} 的显示器（现有：${monitors.map((m) => m.index).join("、")}，用 displays 工具查看）`);
+        originX = target.rect.x;
+        originY = target.rect.y;
+        width = target.rect.w;
+        height = target.rect.h;
+      }
       if (width <= 0 || height <= 0) throw new Error("无法获取屏幕尺寸");
       this.origin = { x: originX, y: originY };
 
@@ -377,14 +388,19 @@ export class WindowsDriver {
     });
   }
 
-  /** 截取整个虚拟屏幕，返回图片 + 坐标契约说明。 */
-  async screenshot() {
-    const c = await this.#capture();
+  /** 截取整个虚拟屏幕（或指定显示器），返回图片 + 坐标契约说明。 */
+  async screenshot(display) {
+    const c = await this.#capture(display);
     const image = this.#prepareImage(c);
     return [
       toImageContent(encodePNG(image), "screen.png", image.width, image.height),
       { type: "text", text: this.#geometryText(image, c) }
     ];
+  }
+
+  /** 0.9.2 枚举显示器（虚拟屏支持）：几何 + 主屏标记 + 设备描述。 */
+  async listDisplays() {
+    return await this.#withThreadDpi(async () => this.native.displays());
   }
 
   /** 读取当前鼠标指针位置（display 坐标 + 物理屏幕坐标）。 */
@@ -971,6 +987,72 @@ export function createKoffiNative(koffiImpl) {
     flashApiError = String(error?.message ?? error);
   }
 
+  // 0.9.2 显示器枚举（虚拟屏支持）：独立懒防御——声明失败只禁用 displays
+  // 工具（listDisplays 返回错误说明），绝不连累截图/点击/输入链路。
+  let displayApi = null;
+  let displayApiError = null;
+  try {
+    const RectStruct = koffi.struct("CU_DD_Rect", { left: "long", top: "long", right: "long", bottom: "long" });
+    // MONITORINFOEXW：cb(4)+rcMonitor(16)+rcWork(16)+dwFlags(4)+szDevice[32]W(64)=104
+    const MonitorInfoExW = koffi.struct("CU_DD_MonitorInfoExW", {
+      cbSize: "uint32",
+      rcMonitor: RectStruct,
+      rcWork: RectStruct,
+      dwFlags: "uint32",
+      szDevice: koffi.array("char16_t", 32)
+    });
+    // DISPLAY_DEVICEW：4+64+256+4+256+256=840
+    const DisplayDeviceW = koffi.struct("CU_DD_DisplayDeviceW", {
+      cb: "uint32",
+      DeviceName: koffi.array("char16_t", 32),
+      DeviceString: koffi.array("char16_t", 128),
+      StateFlags: "uint32",
+      DeviceID: koffi.array("char16_t", 128),
+      DeviceKey: koffi.array("char16_t", 128)
+    });
+    const GetMonitorInfoW = user32.func("bool GetMonitorInfoW(void* hMonitor, void* lpmi)");
+    const EnumDisplayDevicesW = user32.func("bool EnumDisplayDevicesW(str16 device, uint32 index, void* ptr, uint32 flags)");
+    const MonitorEnumProc = koffi.proto("int32 __stdcall MonitorEnumProc(void* hMonitor, void* hdc, void* lprc, intptr data)");
+    const EnumDisplayMonitors = user32.func("bool EnumDisplayMonitors(void* hdc, void* clip, MonitorEnumProc* cb, intptr data)");
+    displayApi = {
+      MONITORINFOF_PRIMARY: 1,
+      list: () => {
+        const handles = [];
+        const cb = koffi.register((hmon) => { handles.push(hmon); return 1; }, MonitorEnumProc);
+        try {
+          if (!EnumDisplayMonitors(null, null, cb, 0)) throw new Error("EnumDisplayMonitors 失败");
+        } finally {
+          koffi.unregister(cb); // 同步枚举完即注销，防泄漏
+        }
+        const byDevice = new Map(); // "\.\DISPLAY1" -> {description, isVirtual}
+        for (let i = 0; i < 16; i++) {
+          const dd = koffi.alloc(DisplayDeviceW, 1);
+          koffi.encode(dd, DisplayDeviceW, { cb: 840 });
+          if (!EnumDisplayDevicesW(null, i, dd, 0)) break;
+          const name = koffi.decode(dd, DisplayDeviceW, 0).DeviceName;
+          const desc = koffi.decode(dd, DisplayDeviceW, 0).DeviceString;
+          if (typeof name === "string" && name) byDevice.set(name, { description: typeof desc === "string" ? desc : "", deviceId: String(koffi.decode(dd, DisplayDeviceW, 0).DeviceID || "") });
+        }
+        return handles.map((hmon, index) => {
+          const mi = koffi.alloc(MonitorInfoExW, 1);
+          if (!GetMonitorInfoW(hmon, mi)) return null;
+          const info = koffi.decode(mi, MonitorInfoExW, 0);
+          const meta = byDevice.get(info.szDevice) || {};
+          return {
+            index,
+            device: info.szDevice,
+            description: meta.description || "",
+            primary: (info.dwFlags & 1) === 1,
+            rect: { x: info.rcMonitor.left, y: info.rcMonitor.top, w: info.rcMonitor.right - info.rcMonitor.left, h: info.rcMonitor.bottom - info.rcMonitor.top },
+            work: { x: info.rcWork.left, y: info.rcWork.top, w: info.rcWork.right - info.rcWork.left, h: info.rcWork.bottom - info.rcWork.top }
+          };
+        }).filter(Boolean);
+      }
+    };
+  } catch (error) {
+    displayApiError = String(error?.message ?? error);
+  }
+
   const CreateCompatibleDC = gdi32.func("void* CreateCompatibleDC(void* hdc)");
   const DeleteDC = gdi32.func("int DeleteDC(void* hdc)");
   const CreateCompatibleBitmap = gdi32.func("void* CreateCompatibleBitmap(void* hdc, int cx, int cy)");
@@ -1075,6 +1157,10 @@ export function createKoffiNative(koffiImpl) {
     selectObject: (dc, obj) => SelectObject(dc, obj),
     bitBlt: (dc, w, h, src, ox, oy) => BitBlt(dc, 0, 0, w, h, src, ox, oy, SRCCOPY),
     deleteObject: (o) => DeleteObject(o),
+    displays: () => {
+      if (!displayApi) throw new Error(`显示器枚举不可用：${displayApiError}`);
+      return displayApi.list();
+    },
     allocBitmapInfo: (w, h) => {
       // koffi 2.16 的 alloc(type, length) 第二参是元素个数，不是初始值——
       // 旧写法 alloc(结构体, {对象}) 抛 "Unexpected Object value for length"。

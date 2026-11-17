@@ -45,7 +45,8 @@ description: 让 Agent 操控 Windows 桌面：元素侦察（UI Automation/浏�
 | 工具 | 要点 |
 |---|---|
 | `doctor` / `settings` | 环境自检 / 设置控制台（参数、OmniParser 一键安装） |
-| `screenshot` | 截屏+坐标契约；视觉判断才截，连环截图不产生新信息 |
+| `screenshot` | 截屏+坐标契约（可选 display 聚焦单屏）；视觉判断才截，连环截图不产生新信息 |
+| `displays` | 枚举显示器（几何/主屏/设备描述，识别虚拟屏）；多屏或虚拟工作区先看布局再 screenshot(display) 聚焦 |
 | `inspect` | 元素清单；`backend`(auto/progressive/uia/extension/omniparser)、`view`(simple/full/desktop-buttons/desktop，仅 progressive)、`annotate`、`scope`(foreground/desktop) |
 | `act` | **语义动作优先**：invoke/toggle/expand/select/setValue 按 elementId 直操元素（0.8.4） |
 | `click` | elementId 优先；或 x,y 兜底；`button`、`double` |

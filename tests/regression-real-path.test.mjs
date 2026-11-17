@@ -33,7 +33,15 @@ test("createKoffiNative 同进程幂等：重复调用复用单例，不重复�
   const fakeKoffi = {
     load: () => ({ func: () => () => 0 }),
     struct: (name) => { structNames.push(name); return {}; },
-    as: (v) => v
+    as: (v) => v,
+    /* 0.9.2 displayApi 声明链所需：齐全后显示器枚举全链走通（懒防御不再兜底）。 */
+    array: () => ({}),
+    proto: () => ({}),
+    register: () => () => 1,
+    unregister: () => {},
+    alloc: () => ({}),
+    decode: () => ({ szDevice: "TEST" }),
+    encode: () => {}
   };
   resetKoffiNativeForTest();
   try {
@@ -43,7 +51,7 @@ test("createKoffiNative 同进程幂等：重复调用复用单例，不重复�
     assert.equal(n1, n2, "重复调用必须返回同一实例");
     assert.deepEqual(
       structNames,
-      ["BITMAPINFOHEADER", "SA_POINT", "SA_SIZE", "SA_BLENDFUNC", "SA_WNDCLASSEXW", "SA_INPUT"],
+      ["CU_DD_Rect", "CU_DD_MonitorInfoExW", "CU_DD_DisplayDeviceW", "BITMAPINFOHEADER", "SA_POINT", "SA_SIZE", "SA_BLENDFUNC", "SA_WNDCLASSEXW", "SA_INPUT"],
       "koffi 类型各只允许注册一次"
     );
     // doctor 的 loadNative 与 driver 的 #ensureNative 两条路径共享同一实例
