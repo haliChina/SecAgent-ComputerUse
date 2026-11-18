@@ -51,7 +51,7 @@ test("createKoffiNative 同进程幂等：重复调用复用单例，不重复�
     assert.equal(n1, n2, "重复调用必须返回同一实例");
     assert.deepEqual(
       structNames,
-      ["CU_DD_Rect", "CU_DD_MonitorInfoExW", "CU_DD_DisplayDeviceW", "BITMAPINFOHEADER", "SA_POINT", "SA_SIZE", "SA_BLENDFUNC", "SA_WNDCLASSEXW", "SA_INPUT"],
+      ["CU_DD_Rect", "CU_DD_MonitorInfoExW", "CU_DD_DisplayDeviceW", "CU_LII", "BITMAPINFOHEADER", "SA_POINT", "SA_SIZE", "SA_BLENDFUNC", "SA_WNDCLASSEXW", "SA_INPUT"],
       "koffi 类型各只允许注册一次"
     );
     // doctor 的 loadNative 与 driver 的 #ensureNative 两条路径共享同一实例

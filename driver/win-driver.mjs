@@ -398,6 +398,11 @@ export class WindowsDriver {
     ];
   }
 
+  /** 0.9.3 读取用户键鼠空闲时长（ms）——doctor 检查用。 */
+  userIdleMs() {
+    return this.native.userIdleMs();
+  }
+
   /** 0.9.2 枚举显示器（虚拟屏支持）：几何 + 主屏标记 + 设备描述。 */
   async listDisplays() {
     return await this.#withThreadDpi(async () => this.native.displays());
@@ -654,6 +659,7 @@ export class WindowsDriver {
   }
 
   async move(x, y) {
+    const arbitration = await this.#arbitrateUser();
     return await this.#withThreadDpi(() => {
       const p = this.#toAbsolute(x, y);
       this.native.setCursorPos(p.x, p.y);
@@ -673,10 +679,42 @@ export class WindowsDriver {
    * @param {"left"|"right"|"middle"} [target.button="left"]
    * @param {boolean} [target.double=false]
    */
+  /** 0.9.3 用户活跃让位（不打架第二层）：坐标动作执行前等用户空闲。
+   * - 只挂 move/click/drag/scroll/type 等坐标通道；act（UIA 语义）无光标
+   *   无焦点天然无冲突，不仲裁。
+   * - 异步 Promise 轮询（250ms），不阻塞宿主主进程（插件 in-process 加载）。
+   * - 超时后放行继续执行——不让 Agent 死锁；等待与让位原因记入返回值。
+   * - fail-open：GetLastInputInfo 不可用（声明失败）时跳过仲裁。 */
+  async #arbitrateUser() {
+    const cfg = this.#cfg();
+    if (cfg?.userArbitration === false) return { arbitration: "off" };
+    /* 老测试桩/降级环境 native 面可能缺 0.9.3 方法——缺即视为不可用（fail-open）。 */
+    if (typeof this.native.userArbitrationAvailable !== "function" || typeof this.native.userIdleMs !== "function")
+      return { arbitration: "unavailable" };
+    if (!this.native.userArbitrationAvailable()) return { arbitration: "unavailable" };
+    /* Number(undefined)=NaN：|| 对 NaN 兜底成功但 ?? 不兜（0.9.3 测试实锤）——
+       统一走 Number.isFinite 门卫。 */
+    const idleRaw = Number(cfg?.userArbitrationIdleMs);
+    const timeoutRaw = Number(cfg?.userArbitrationTimeoutMs);
+    const idleMs = Number.isFinite(idleRaw) ? idleRaw : 2000;
+    const timeoutMs = Number.isFinite(timeoutRaw) ? timeoutRaw : 30000;
+    if (timeoutMs <= 0) return { arbitration: "disabled" };
+    const start = Date.now();
+    // 首查即空闲：零延迟直通（绝大多数情况）。
+    if (this.native.userIdleMs() >= idleMs) return { arbitration: "clear" };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    while (Date.now() - start < timeoutMs) {
+      await sleep(250);
+      if (this.native.userIdleMs() >= idleMs) return { arbitration: "waited", waitedMs: Date.now() - start };
+    }
+    return { arbitration: "timeout", waitedMs: Date.now() - start };
+  }
+
   async clickTarget({ elementId, x, y, button = "left", double = false } = {}) {
     const b = BUTTONS[button];
     if (!b) throw new Error(`不支持的按键：${button}`);
 
+    const arbitration = await this.#arbitrateUser();
     let abs, label;
     if (elementId != null) {
       let el = findElement(this.#lastMap.elements, elementId);
@@ -710,7 +748,7 @@ export class WindowsDriver {
     // 落点视觉标记（#12 → 0.7.3）：宿主发光优先、koffi 兜底；设置可关。
     this.#flash(abs, "click").catch(() => { /* 无碍 */ });
     this.#mutated = true; // 写后作废：点击会改变 UI 状态
-    return { clicked: { ...label, button, double } };
+    return { clicked: { ...label, button, double }, arbitration };
   }
 
   /** 兼容接口：在相对坐标 (x,y) 点击。 */
@@ -722,6 +760,7 @@ export class WindowsDriver {
   async drag(fromX, fromY, toX, toY, button = "left") {
     const b = BUTTONS[button];
     if (!b) throw new Error(`不支持的按键：${button}`);
+    const arbitration = await this.#arbitrateUser();
     return await this.#withThreadDpi(async () => {
       const from = this.#toAbsolute(fromX, fromY);
       const to = this.#toAbsolute(toX, toY);
@@ -751,6 +790,7 @@ export class WindowsDriver {
   async scroll(x, y, amount) {
     const n = amount | 0;
     if (!n) throw new Error("滚动量不能为 0");
+    const arbitration = await this.#arbitrateUser();
     return await this.#withThreadDpi(async () => {
       const p = this.#toAbsolute(x, y);
       this.native.setCursorPos(p.x, p.y);
@@ -772,6 +812,7 @@ export class WindowsDriver {
    */
   async type(text) {
     if (typeof text !== "string") throw new Error("type 需要字符串");
+    const arbitration = await this.#arbitrateUser();
     return await this.#withThreadDpi(() => {
       if (!text.length) return { typed: { length: 0 }, mode: "none" };
 
@@ -1053,6 +1094,30 @@ export function createKoffiNative(koffiImpl) {
     displayApiError = String(error?.message ?? error);
   }
 
+  // 0.9.3 用户活跃检测（不打架第二层）：GetLastInputInfo——坐标动作前查
+  // 用户最近键鼠输入，活跃则让位等待。独立懒防御：声明失败只禁用仲裁
+  // （fail-open——核心动作不能挂），doctor 可见原因。
+  let inputApi = null;
+  let inputApiError = null;
+  try {
+    const LastInputInfo = koffi.struct("CU_LII", { cbSize: "uint32", dwTime: "uint32" });
+    const GetLastInputInfo = user32.func("bool GetLastInputInfo(void* plii)");
+    const GetTickCount = kernel32.func("uint32 GetTickCount()");
+    inputApi = {
+      userIdleMs: () => {
+        const lii = koffi.alloc(LastInputInfo, 1);
+        koffi.encode(lii, LastInputInfo, { cbSize: 8, dwTime: 0 });
+        if (!GetLastInputInfo(lii)) throw new Error("GetLastInputInfo 失败");
+        const last = koffi.decode(lii, 0, "uint32");
+        const now = GetTickCount();
+        // 49.7 天回绕：now < last 说明 tick 回绕，按回绕差计算
+        return now >= last ? now - last : now + (0x100000000 - last);
+      }
+    };
+  } catch (error) {
+    inputApiError = String(error?.message ?? error);
+  }
+
   const CreateCompatibleDC = gdi32.func("void* CreateCompatibleDC(void* hdc)");
   const DeleteDC = gdi32.func("int DeleteDC(void* hdc)");
   const CreateCompatibleBitmap = gdi32.func("void* CreateCompatibleBitmap(void* hdc, int cx, int cy)");
@@ -1161,6 +1226,11 @@ export function createKoffiNative(koffiImpl) {
       if (!displayApi) throw new Error(`显示器枚举不可用：${displayApiError}`);
       return displayApi.list();
     },
+    userIdleMs: () => {
+      if (!inputApi) throw new Error(`用户活跃检测不可用：${inputApiError}`);
+      return inputApi.userIdleMs();
+    },
+    userArbitrationAvailable: () => inputApi !== null,
     allocBitmapInfo: (w, h) => {
       // koffi 2.16 的 alloc(type, length) 第二参是元素个数，不是初始值——
       // 旧写法 alloc(结构体, {对象}) 抛 "Unexpected Object value for length"。

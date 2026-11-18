@@ -33,7 +33,9 @@ export async function runDoctor(deps = {}) {
     badgeProbe = null,
     // 0.7.6（issue #18 问题 3）：venv torch CUDA 探测——无 CUDA 的机器 CPU
     // 推理一屏 8~13 分钟（用户实机实测），报告「不建议启用」。
-    probeCuda = null
+    probeCuda = null,
+    // 0.9.3：用户活跃检测通道——坐标动作让位仲裁的根基。
+    userIdleProbe = null
   } = deps;
 
   const checks = [];
@@ -184,6 +186,25 @@ export async function runDoctor(deps = {}) {
       );
     } catch (error) {
       push("activity-badge", "「正在操作电脑」常驻徽标", false, error?.message ?? String(error), "", true);
+    }
+  }
+
+  // 5.6) 用户活跃检测（0.9.3 不打架仲裁根基）
+  if (typeof userIdleProbe === "function") {
+    try {
+      const r = userIdleProbe() || {};
+      push(
+        "user-idle",
+        "用户活跃让位（GetLastInputInfo）",
+        r.available === true,
+        r.available === true
+          ? `通道正常（当前空闲 ${r.idleMs} ms）——你用键鼠时 Agent 坐标动作会让位等待，UIA 语义动作不受影响`
+          : `不可用：${r.reason ?? "未知原因"}——坐标动作将不仲裁直接执行（fail-open），UIA 语义动作本就不冲突`,
+        r.available === true ? "" : "升级插件或重启应用；不打架仍可依赖 act 语义动作与虚拟屏空间隔离。",
+        true
+      );
+    } catch (error) {
+      push("user-idle", "用户活跃让位（GetLastInputInfo）", false, error?.message ?? String(error), "", true);
     }
   }
 

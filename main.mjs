@@ -318,7 +318,14 @@ export async function activate(api) {
           return out;
         },
         // 0.8.1 徽标自检：真实 touch 一次（宿主右下角显示 8 秒）
-        badgeProbe: () => driver.touchActivity()
+        badgeProbe: () => driver.touchActivity(),
+        userIdleProbe: () => {
+          try {
+            return { available: true, idleMs: driver.userIdleMs() };
+          } catch (error) {
+            return { available: false, reason: error?.message ?? String(error) };
+          }
+        }
       });
       return {
         ok: result.ok,
