@@ -105,7 +105,9 @@ export class WindowsDriver {
     probeCuda = null,
     // 0.8.1：宿主常驻「正在操作电脑」徽标通道（api.agentActivity）。
     // 独立于 actionFlash 开关——徽标是状态指示不是视觉特效。
-    hostActivity = null
+    hostActivity = null,
+    // 0.9.4：宿主观察窗帧通道（api.agentFrame）——screenshot 旁路，静默失败。
+    hostFrame = null
   } = {}) {
     this.native = native;
     this.origin = { x: 0, y: 0 };
@@ -124,6 +126,7 @@ export class WindowsDriver {
     this.omniTokenProvider = typeof omniTokenProvider === "function" ? omniTokenProvider : null;
     this.probeCuda = typeof probeCuda === "function" ? probeCuda : null;
     this.hostActivity = typeof hostActivity === "function" ? hostActivity : null;
+    this.hostFrame = typeof hostFrame === "function" ? hostFrame : null;
     /** 徽标通道诊断（doctor 可查）。 */
     this.lastActivity = null;
     /** CUDA 探测缓存：null=未探测（或不可探测），true=可用，false=纯 CPU。 */
@@ -392,8 +395,14 @@ export class WindowsDriver {
   async screenshot(display) {
     const c = await this.#capture(display);
     const image = this.#prepareImage(c);
+    const png = encodePNG(image);
+    /* 0.9.4 观察窗旁路：推 base64 帧给宿主观察窗（fire-and-forget，
+       旧宿主/观察窗未开静默——绝不拖累截图主链路）。 */
+    if (this.hostFrame) {
+      try { this.hostFrame(png.toString("base64"), { width: image.width, height: image.height }); } catch { /* ignore */ }
+    }
     return [
-      toImageContent(encodePNG(image), "screen.png", image.width, image.height),
+      toImageContent(png, "screen.png", image.width, image.height),
       { type: "text", text: this.#geometryText(image, c) }
     ];
   }

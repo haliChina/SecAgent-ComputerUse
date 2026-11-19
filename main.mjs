@@ -88,6 +88,12 @@ export async function activate(api) {
     hostActivity:
       typeof api.agentActivity === "function"
         ? (input) => api.agentActivity(input)
+        : null,
+    // 0.9.4：宿主观察窗帧通道（api.agentFrame，宿主 ≥ R104 才有）——
+    // screenshot 产物旁路推送，fire-and-forget。
+    hostFrame:
+      typeof api.agentFrame === "function"
+        ? (png, meta) => api.agentFrame(png, meta)
         : null
   });
 
